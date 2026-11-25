@@ -1,0 +1,45 @@
+[server]
+host = "0.0.0.0"
+port = 8080
+api_key = ""                  # 非空则要求 Authorization: Bearer <key>
+max_body_mb = 32
+request_timeout_secs = 300
+
+[qdrant]
+url = "http://localhost:6334" # gRPC 端口（REST 6333 不用于 CRUD）
+api_key = ""
+timeout_secs = 30
+startup_retry_secs = 30       # 启动时等待 Qdrant 就绪
+
+[embedding]
+provider = "local"            # local | api
+batch_size = 32
+max_concurrent_batches = 4
+
+[embedding.local]
+model = "bge-small-zh-v1.5"
+cache_dir = "./data/models"
+show_download_progress = true
+max_length = 512
+warmup = true
+query_prefix = ""             # 留空使用模型默认前缀
+document_prefix = ""
+
+[embedding.api]
+base_url = "https://api.openai.com/v1"
+api_key = ""
+model = "text-embedding-3-small"
+dimensions = 0                # 0 = 探针获取
+timeout_secs = 60
+max_retries = 3
+
+[ingest]
+# 注意：chunk_size 按 Unicode 字符计数，而 [embedding.local].max_length 是模型的
+# token 上限。对中文等 CJK 文本，一个字符通常接近一个 token（粗略估算，并非精确
+# 换算）；默认 800 字符大于默认 512 token，超长块会被本地模型静默截断。
+# 使用 CJK 本地模型时建议把 chunk_size 降到 400 左右，并重新注入已有文档。
+# provider=local 且 chunk_size > max_length 时，服务启动会打印 WARN 日志。
+chunk_size = 800              # 字符数
+chunk_overlap = 120
+min_chunk_size = 30
+upsert_batch_size = 64
