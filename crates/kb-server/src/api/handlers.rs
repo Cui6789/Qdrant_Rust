@@ -4,6 +4,7 @@ use axum::extract::multipart::MultipartRejection;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::Json;
 use kb_core::error::KbError;
 use kb_core::ingest::parser::decode_bytes;
@@ -33,9 +34,17 @@ pub struct DeleteDocumentQuery {
     pub doc_id: String,
 }
 
-/// Maps an extractor rejection onto a `VALIDATION_ERROR`.
-fn rejection(error: impl std::fmt::Display) -> ApiError {
-    ApiError(KbError::Validation(error.to_string()))
+/// Maps an extractor rejection onto an [`ApiError`].
+///
+/// Size-limit failures must stay 413 `PAYLOAD_TOO_LARGE` (the design's error
+/// contract); every other extractor rejection becomes `VALIDATION_ERROR`.
+fn rejection(error: impl IntoResponse + std::fmt::Display) -> ApiError {
+    let message = error.to_string();
+    if error.into_response().status() == StatusCode::PAYLOAD_TOO_LARGE {
+        ApiError(KbError::PayloadTooLarge(message))
+    } else {
+        ApiError(KbError::Validation(message))
+    }
 }
 
 /// `GET /health` — Qdrant connectivity and embedding details, no auth.

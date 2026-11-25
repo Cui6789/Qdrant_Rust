@@ -35,6 +35,7 @@ impl ApiError {
             KbError::DimensionMismatch(_) => (StatusCode::CONFLICT, "EMBEDDING_DIM_MISMATCH"),
             KbError::Embedding(_) => (StatusCode::BAD_GATEWAY, "EMBEDDING_ERROR"),
             KbError::Qdrant(_) => (StatusCode::BAD_GATEWAY, "QDRANT_ERROR"),
+            KbError::PayloadTooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE"),
         }
     }
 }

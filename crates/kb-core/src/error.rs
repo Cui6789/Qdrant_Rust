@@ -23,6 +23,8 @@ pub enum KbError {
     Embedding(String),
     #[error("qdrant error: {0}")]
     Qdrant(String),
+    #[error("payload too large: {0}")]
+    PayloadTooLarge(String),
     #[error("parse error: {0}")]
     Parse(String),
     #[error("io error: {0}")]

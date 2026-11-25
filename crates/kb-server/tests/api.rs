@@ -297,6 +297,26 @@ async fn body_limit_returns_413_envelope() {
 }
 
 #[tokio::test]
+async fn v1_body_limit_returns_413_envelope() {
+    let service = service_for(UNREACHABLE_QDRANT, 1, deterministic_embedder());
+    let mut state = app_state(service, None, local_embedding_info(), 10);
+    state.max_body_bytes = 64;
+    let app = build_router(state);
+
+    let oversized = json!({
+        "name": "docs",
+        "padding": "x".repeat(1024),
+    });
+    let (status, body) = send_json(
+        &app,
+        json_request(Method::POST, "/v1/collections", None, &oversized),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(body["error"]["code"], "PAYLOAD_TOO_LARGE");
+}
+
+#[tokio::test]
 async fn unknown_format_returns_415() {
     let app = offline_app();
 
