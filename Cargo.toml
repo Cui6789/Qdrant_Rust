@@ -1,5 +1,11 @@
 [workspace]
-members = ["crates/kb-core", "crates/kb-server"]
+members = [
+    "crates/kb-core",
+    "crates/kb-server",
+    "crates/kb-dashboard",
+    "crates/kb-dashboard-types",
+]
+exclude = ["crates/kb-dashboard-ui"]
 resolver = "2"
 
 [workspace.package]

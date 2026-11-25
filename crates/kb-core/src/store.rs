@@ -23,6 +23,13 @@ use crate::models::CollectionInfo;
 /// Readiness polling interval used by [`QdrantStore::wait_ready`].
 const READY_POLL: Duration = Duration::from_millis(500);
 
+/// A stored point's id and payload, as consumed by read-only dashboards.
+#[derive(Debug, Clone)]
+pub struct StoredPoint {
+    pub id: String,
+    pub payload: serde_json::Map<String, serde_json::Value>,
+}
+
 /// Connection to a Qdrant server.
 #[derive(Clone)]
 pub struct QdrantStore {
@@ -197,6 +204,48 @@ impl QdrantStore {
                     .into_iter()
                     .map(|(key, value)| (key, serde_json::Value::from(value)))
                     .collect()
+            })
+            .collect())
+    }
+
+    /// Scrolls matching points and returns their ids together with payloads.
+    ///
+    /// This is the read-only counterpart of [`Self::upsert`] used by the
+    /// dashboard to enumerate documents without knowing point ids in advance.
+    pub async fn scroll_points(
+        &self,
+        collection: &str,
+        filter: Option<Filter>,
+        limit: u32,
+    ) -> Result<Vec<StoredPoint>> {
+        let mut builder = ScrollPointsBuilder::new(collection)
+            .limit(limit)
+            .with_payload(true);
+        if let Some(filter) = filter {
+            builder = builder.filter(filter);
+        }
+        let response = self
+            .client
+            .scroll(builder)
+            .await
+            .map_err(|error| map_error(Some(collection), error))?;
+        Ok(response
+            .result
+            .into_iter()
+            .map(|point| {
+                let id = match point.id.and_then(|id| id.point_id_options) {
+                    Some(PointIdOptions::Uuid(value)) => value,
+                    Some(PointIdOptions::Num(value)) => value.to_string(),
+                    None => String::new(),
+                };
+                StoredPoint {
+                    id,
+                    payload: point
+                        .payload
+                        .into_iter()
+                        .map(|(key, value)| (key, serde_json::Value::from(value)))
+                        .collect(),
+                }
             })
             .collect())
     }

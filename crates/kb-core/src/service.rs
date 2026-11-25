@@ -31,6 +31,13 @@ use crate::store::QdrantStore;
 /// Number of striped mutexes used to serialize per-document writes.
 const LOCK_STRIPES: usize = 64;
 
+/// Number of leading chunks summarized in [`IngestEvent::Chunked`].
+const PREVIEW_CHUNKS: usize = 8;
+/// Maximum characters kept in one chunk preview.
+const PREVIEW_CHARS: usize = 180;
+/// Number of leading vector components included in [`IngestEvent::EmbeddingFinished`].
+const VECTOR_PREVIEW_DIMS: usize = 16;
+
 /// Input for [`KnowledgeBaseService::ingest_document`].
 #[derive(Debug, Clone)]
 pub struct IngestInput {
@@ -38,6 +45,54 @@ pub struct IngestInput {
     pub text: String,
     pub format: DocumentFormat,
     pub metadata: DocumentMetadata,
+}
+
+/// A compact description of one chunk, suitable for a progress UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkPreview {
+    pub index: usize,
+    pub characters: usize,
+    pub heading_path: String,
+    pub preview: String,
+}
+
+/// Progress events emitted while a document is ingested.
+///
+/// The service itself stays UI-agnostic: callers pass a synchronous observer
+/// to [`KnowledgeBaseService::ingest_document_observed`] and decide how to
+/// transport or render these events.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IngestEvent {
+    /// Parsing produced normalized text with `characters` Unicode scalar values.
+    Parsed { characters: usize },
+    /// Chunking produced `total` chunks; `previews` holds the leading ones.
+    Chunked {
+        total: usize,
+        previews: Vec<ChunkPreview>,
+    },
+    /// Reconciliation found an identical version and skipped embedding.
+    Existing { chunks: usize },
+    /// Only metadata changed; payloads were updated in place.
+    MetadataUpdated { chunks: usize },
+    /// The embedding provider is about to be called.
+    EmbeddingStarted {
+        chunks: usize,
+        model: String,
+        dimension: usize,
+    },
+    /// Vectors were produced; `preview` holds the leading dimensions of the first.
+    EmbeddingFinished {
+        chunks: usize,
+        dimension: usize,
+        preview: Vec<f32>,
+        norm: f32,
+    },
+    /// Points are being written to Qdrant.
+    Writing { points: usize, batches: usize },
+    /// All point batches were accepted by Qdrant.
+    Written { points: usize },
+    /// Stale points of the document were removed after the write.
+    Cleaned,
 }
 
 /// In-process knowledge base operations over a Qdrant store.
@@ -116,16 +171,39 @@ impl KnowledgeBaseService {
         collection: &str,
         input: IngestInput,
     ) -> Result<IngestResult> {
+        self.ingest_document_observed(collection, input, &|_| {})
+            .await
+    }
+
+    /// Ingests a document and reports fine-grained progress through `observer`.
+    ///
+    /// The observer is called synchronously at each stage boundary and should
+    /// stay cheap (for example, push into a channel or a mutex-protected log).
+    /// A closure that ignores every event yields the same behavior as
+    /// [`Self::ingest_document`].
+    pub async fn ingest_document_observed(
+        &self,
+        collection: &str,
+        input: IngestInput,
+        observer: &(dyn Fn(IngestEvent) + Send + Sync),
+    ) -> Result<IngestResult> {
         validate_collection_name(collection)?;
         if !self.store.collection_exists(collection).await? {
             return Err(KbError::CollectionNotFound(collection.to_string()));
         }
 
         let parsed = parse_text(&input.text, input.format)?;
+        observer(IngestEvent::Parsed {
+            characters: parsed.chars().count(),
+        });
         let chunks = chunk_document(&parsed, input.format, &self.ingest)?;
+        let chunk_count = chunks.len();
+        observer(IngestEvent::Chunked {
+            total: chunk_count,
+            previews: chunk_previews(&chunks),
+        });
         let content_hash = content_hash(&parsed);
         let doc_id = resolve_doc_id(&input, &content_hash)?;
-        let chunk_count = chunks.len();
         let ids = point_ids(collection, &doc_id, &content_hash, chunk_count);
         let embedding_model = self.embedder.model_id().to_string();
 
@@ -159,6 +237,9 @@ impl KnowledgeBaseService {
                         .iter()
                         .all(|payload| chunk_payload_matches(payload, &chunks));
                 if chunks_match {
+                    observer(IngestEvent::Existing {
+                        chunks: chunk_count,
+                    });
                     let metadata_changed = payloads
                         .iter()
                         .any(|payload| !metadata_matches(payload, &input.metadata));
@@ -170,11 +251,15 @@ impl KnowledgeBaseService {
                                 metadata_payload(&input.metadata),
                             )
                             .await?;
+                        observer(IngestEvent::MetadataUpdated {
+                            chunks: chunk_count,
+                        });
                         true
                     } else {
                         false
                     };
                     self.cleanup_stale(collection, &doc_id, &ids).await?;
+                    observer(IngestEvent::Cleaned);
                     return Ok(IngestResult {
                         doc_id,
                         chunks: chunk_count,
@@ -189,7 +274,22 @@ impl KnowledgeBaseService {
 
         // Either the chunk set is incomplete or its ids do not line up: embed
         // and rewrite the whole version, then clean up every stale point.
+        observer(IngestEvent::EmbeddingStarted {
+            chunks: chunk_count,
+            model: embedding_model.clone(),
+            dimension: self.embedder.dimension(),
+        });
         let vectors = self.embed_chunks(&chunks).await?;
+        let (preview, norm) = vectors
+            .first()
+            .map(|vector| vector_probe(vector))
+            .unwrap_or_default();
+        observer(IngestEvent::EmbeddingFinished {
+            chunks: chunk_count,
+            dimension: vectors.first().map(Vec::len).unwrap_or(0),
+            preview,
+            norm,
+        });
         let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let mut points = Vec::with_capacity(chunk_count);
         for (chunk, vector) in chunks.iter().zip(vectors) {
@@ -209,10 +309,19 @@ impl KnowledgeBaseService {
             ));
         }
         let batch_size = self.ingest.upsert_batch_size.max(1);
+        let batches = points.len().div_ceil(batch_size);
+        observer(IngestEvent::Writing {
+            points: points.len(),
+            batches,
+        });
         for batch in points.chunks(batch_size) {
             self.store.upsert(collection, batch.to_vec()).await?;
         }
+        observer(IngestEvent::Written {
+            points: chunk_count,
+        });
         self.cleanup_stale(collection, &doc_id, &ids).await?;
+        observer(IngestEvent::Cleaned);
 
         Ok(IngestResult {
             doc_id,
@@ -624,6 +733,42 @@ fn point_ids(collection: &str, doc_id: &str, content_hash: &str, chunk_count: us
     (0..chunk_count)
         .map(|index| point_id(collection, doc_id, content_hash, index))
         .collect()
+}
+
+/// Builds compact previews for the leading chunks.
+fn chunk_previews(chunks: &[Chunk]) -> Vec<ChunkPreview> {
+    chunks
+        .iter()
+        .take(PREVIEW_CHUNKS)
+        .map(|chunk| ChunkPreview {
+            index: chunk.index,
+            characters: chunk.text.chars().count(),
+            heading_path: chunk.heading_path.clone(),
+            preview: truncate_chars(&chunk.text, PREVIEW_CHARS),
+        })
+        .collect()
+}
+
+/// Truncates `text` to at most `limit` characters, marking elision with an ellipsis.
+fn truncate_chars(text: &str, limit: usize) -> String {
+    let mut output = String::new();
+    for (position, character) in text.chars().enumerate() {
+        if position >= limit {
+            output.push('…');
+            break;
+        }
+        output.push(character);
+    }
+    output
+}
+
+/// Returns the leading dimensions of `vector` and its L2 norm.
+fn vector_probe(vector: &[f32]) -> (Vec<f32>, f32) {
+    let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+    (
+        vector.iter().take(VECTOR_PREVIEW_DIMS).copied().collect(),
+        norm,
+    )
 }
 
 /// SHA-256 of normalized document text, lowercase hex.

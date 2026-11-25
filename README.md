@@ -12,6 +12,7 @@
 - **稳健的 HTTP 层**：Bearer 鉴权（可选）、请求体大小限制、统一超时、稳定的错误码信封。
 - **生产可用部署**：多阶段 Dockerfile、Docker Compose（Qdrant + kb-server），数据与模型缓存持久化。
 - **Windows 开发友好**：提供一键启动 Qdrant 的 PowerShell 脚本，无需 Docker 即可开发。
+- **Rust 可视化工作台**：`kb-dashboard`（Axum）+ `kb-dashboard-ui`（Yew/WASM），实时浏览向量库、运行时接入 OpenAI 兼容 / DashScope 原生嵌入模型，并可视化「输入 → 切块 → 嵌入 → 写入」全过程。
 
 ## 架构
 
@@ -41,7 +42,8 @@ flowchart LR
 ├── config/
 │   └── config.example.toml          # 完整配置模板（复制为 config/config.toml）
 ├── scripts/
-│   └── start-qdrant.ps1             # Windows：下载并启动 Qdrant v1.20.2
+│   ├── start-qdrant.ps1             # Windows：下载并启动 Qdrant v1.20.2
+│   └── start-dashboard.ps1          # 一键启动 Qdrant + 可视化工作台
 ├── crates/
 │   ├── kb-core/
 │   │   ├── src/
@@ -59,17 +61,22 @@ flowchart LR
 │   │   │       ├── parser.rs        # 文本/HTML/JSON 解析与编码解码
 │   │   │       └── chunker.rs       # 标题感知切块
 │   │   └── tests/store_service.rs   # 需真实 Qdrant 的集成测试
-│   └── kb-server/
-│       ├── src/
-│       │   ├── main.rs              # 启动、配置、信号
-│       │   ├── lib.rs               # build_embedder（feature 开关）
-│       │   ├── state.rs             # AppState
-│       │   ├── error.rs             # KbError -> HTTP 错误信封
-│       │   └── api/
-│       │       ├── routes.rs        # 路由、鉴权、中间件
-│       │       └── handlers.rs      # HTTP handler
-│       └── tests/api.rs             # axum oneshot HTTP 测试
-└── docs/superpowers/                # 设计与实施计划
+│   ├── kb-server/
+│   │   ├── src/
+│   │   │   ├── main.rs              # 启动、配置、信号
+│   │   │   ├── lib.rs               # build_embedder（feature 开关）
+│   │   │   ├── state.rs             # AppState
+│   │   │   ├── error.rs             # KbError -> HTTP 错误信封
+│   │   │   └── api/
+│   │   │       ├── routes.rs        # 路由、鉴权、中间件
+│   │   │       └── handlers.rs      # HTTP handler
+│   │   └── tests/api.rs             # axum oneshot HTTP 测试
+│   ├── kb-dashboard-types/          # 可视化工作台前后端共享 wire types
+│   ├── kb-dashboard/                # 可视化工作台后端（Axum + 静态托管）
+│   └── kb-dashboard-ui/             # Yew/WASM 前端（独立 workspace，trunk 构建）
+└── docs/
+    ├── dashboard.md                 # 可视化工作台使用与协议说明
+    └── superpowers/                 # 设计与实施计划
 ```
 
 ## 快速开始
@@ -128,6 +135,39 @@ curl.exe -s http://localhost:8080/health
 > （`kb-server` 通过 Compose 内部网络访问 `http://qdrant:6334`）。Qdrant 本身默认
 > 无鉴权；如果确需远程访问，必须为它配置 API key、TLS 或前置一个鉴权代理，
 > 并且不要用 `0.0.0.0` 直接发布端口。
+
+## 可视化工作台
+
+项目内置一个 Apple 风格的可视化工作台（Axum + Yew/WASM）：实时查看 Qdrant 中的文档，
+在页面里填写嵌入模型的 Base URL 与 API Key，并观察「输入 → 解析切块 → 嵌入 → 写入」
+的完整过程。它直接连接 Qdrant（gRPC 6334），不要求 `kb-server` 同时运行。
+
+```powershell
+# 首次：安装 WASM 目标与 Trunk
+rustup target add wasm32-unknown-unknown
+cargo install trunk --locked
+
+# 构建前端
+cd crates\kb-dashboard-ui
+trunk build --release
+cd ..\..
+
+# 启动（默认 http://127.0.0.1:8090）
+cargo run -p kb-dashboard
+```
+
+或使用一键脚本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start-dashboard.ps1
+```
+
+- 支持 **OpenAI 兼容**（`{base_url}/embeddings`）与 **DashScope 原生**
+  （`{base_url}/services/embeddings/text-embedding/text-embedding`）两种协议。
+- 页面内置通义 MaaS、OpenAI、SiliconFlow、Ollama 等预设；API Key 仅驻留进程内存，
+  不写盘、不写日志。
+- 工作台无登录鉴权且会请求用户填写的 Base URL，默认只绑定 `127.0.0.1`，不要直接暴露到公网。
+- 详细说明、API 参考与安全注意事项见 [docs/dashboard.md](docs/dashboard.md)。
 
 ## 配置说明
 
@@ -904,4 +944,4 @@ Qdrant 的数据默认写入 `.tools\qdrant`，重启 Qdrant 或 kb-server 都�
 - 更多解析器：PDF、DOCX、XLSX、PPTX、网页抓取与 OCR。
 - 多实例写入协调（分布式锁/单写路由）与集合级配置。
 - 更细粒度鉴权、配额、审计日志与 Prometheus 指标。
-- 自动 embedding 模型/维度迁移辅助工具与 Web 管理界面。
+- 自动 embedding 模型/维度迁移辅助工具，以及更完整的 Web 管理界面（多租户、审计、批量任务）；可视化工作台已提供基础版，见 `docs/dashboard.md`。

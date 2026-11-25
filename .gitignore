@@ -7,3 +7,5 @@
 .env
 *.log
 .fastembed_cache
+/crates/kb-dashboard-ui/target
+/crates/kb-dashboard-ui/dist
