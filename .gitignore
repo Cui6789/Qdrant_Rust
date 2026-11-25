@@ -1,0 +1,9 @@
+/target
+/data
+/.tools
+/.worktrees
+/.superpowers
+/config/config.toml
+.env
+*.log
+.fastembed_cache
