@@ -1,0 +1,37 @@
+# Qdrant + kb-server. Both services keep their state in ./data, which is
+# git-ignored. Optional overrides can be placed in a `.env` file next to this
+# one (see .env.example); Compose interpolates them into the environment below.
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.20.2
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    restart: unless-stopped
+
+  kb-server:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      # Required wiring for the container network.
+      KB_QDRANT__URL: http://qdrant:6334
+      KB_EMBEDDING__LOCAL__CACHE_DIR: /data/models
+      # Optional overrides (defaults match config/config.example.toml).
+      KB_SERVER__API_KEY: ${KB_SERVER__API_KEY:-}
+      KB_EMBEDDING__PROVIDER: ${KB_EMBEDDING__PROVIDER:-local}
+      KB_EMBEDDING__LOCAL__MODEL: ${KB_EMBEDDING__LOCAL__MODEL:-bge-small-zh-v1.5}
+      KB_EMBEDDING__API__BASE_URL: ${KB_EMBEDDING__API__BASE_URL:-https://api.openai.com/v1}
+      KB_EMBEDDING__API__API_KEY: ${KB_EMBEDDING__API__API_KEY:-}
+      KB_EMBEDDING__API__MODEL: ${KB_EMBEDDING__API__MODEL:-text-embedding-3-small}
+      KB_EMBEDDING__API__DIMENSIONS: ${KB_EMBEDDING__API__DIMENSIONS:-0}
+      # Hugging Face mirror used when downloading local models.
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
+    volumes:
+      - ./data/models:/data/models
+    depends_on:
+      - qdrant
+    restart: unless-stopped
