@@ -596,6 +596,100 @@ async fn metadata_only_change_updates_payload_without_embedding() {
 }
 
 #[tokio::test]
+async fn changing_chunk_overlap_re_embeds_instead_of_skipping() {
+    let Some(url) = qdrant_url() else { return };
+    let store = Arc::new(store(&url));
+    let embedder = Arc::new(DeterministicEmbedding::new(8));
+    let name = unique_name("rechunk");
+    let first_config = IngestConfig {
+        chunk_size: 20,
+        chunk_overlap: 0,
+        min_chunk_size: 1,
+        upsert_batch_size: 8,
+    };
+    let second_config = IngestConfig {
+        chunk_overlap: 5,
+        ..first_config.clone()
+    };
+    let first_service =
+        KnowledgeBaseService::new(store.clone(), embedder.clone(), first_config.clone());
+    let second_service =
+        KnowledgeBaseService::new(store.clone(), embedder.clone(), second_config.clone());
+    first_service
+        .create_collection(&name)
+        .await
+        .expect("create");
+
+    // Two 15-char paragraphs: with chunk_size 20 both overlap settings pack two
+    // chunks, but the second chunk's text differs (it starts with the overlap).
+    let text = format!("{}\n\n{}", "a".repeat(15), "b".repeat(15));
+    let doc_id = "doc-rechunk";
+    let input = |text: &str| IngestInput {
+        doc_id: Some(doc_id.to_string()),
+        text: text.to_string(),
+        format: DocumentFormat::Text,
+        metadata: DocumentMetadata::default(),
+    };
+
+    let first = first_service
+        .ingest_document(&name, input(&text))
+        .await
+        .expect("first ingest");
+    assert!(!first.skipped);
+    assert_eq!(first.chunks, 2, "fixture must keep the chunk count stable");
+
+    let parsed = parse_text(&text, DocumentFormat::Text).expect("parse fixture");
+    let old_chunks = chunk_document(&parsed, DocumentFormat::Text, &first_config)
+        .expect("chunk with the first config");
+    let new_chunks = chunk_document(&parsed, DocumentFormat::Text, &second_config)
+        .expect("chunk with the second config");
+    assert_eq!(old_chunks.len(), new_chunks.len());
+    assert_ne!(
+        old_chunks[1].text, new_chunks[1].text,
+        "fixture must produce different chunk text"
+    );
+
+    let calls_before = embedder.call_count();
+    let second = second_service
+        .ingest_document(&name, input(&text))
+        .await
+        .expect("second ingest");
+    assert!(
+        !second.skipped,
+        "a chunking-config change must not be reported as skipped"
+    );
+    assert!(!second.metadata_updated);
+    assert!(
+        embedder.call_count() > calls_before,
+        "the changed chunks must be re-embedded"
+    );
+
+    let payloads = store
+        .scroll_payloads(&name, doc_filter(doc_id), 100)
+        .await
+        .expect("scroll payloads");
+    let chunk_one = payloads
+        .iter()
+        .find(|payload| {
+            payload
+                .get("chunk_index")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1)
+        })
+        .expect("chunk index 1 payload");
+    assert_eq!(
+        chunk_one.get("text").and_then(serde_json::Value::as_str),
+        Some(new_chunks[1].text.as_str()),
+        "stored text must reflect the new chunking"
+    );
+
+    second_service
+        .delete_collection(&name)
+        .await
+        .expect("delete collection");
+}
+
+#[tokio::test]
 async fn delete_document_with_unicode_and_slash_ids() {
     let Some(url) = qdrant_url() else { return };
     let store = Arc::new(store(&url));

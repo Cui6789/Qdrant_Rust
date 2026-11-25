@@ -234,6 +234,7 @@ pub trait EmbeddingProvider: Send + Sync {
 3. 将碎片按 `chunk_size`（字符数，默认 800）打包；相邻块保留 `chunk_overlap`（默认 120）字符重叠；尾部过小（< `min_chunk_size`）并入前块。
 4. 每块记录 `heading_path`；embedding 文本为 `heading_path + "\n" + 块文本`（有标题时），payload 里保存原始块文本。
 5. 字符数按 Unicode 标量计算（对中文友好），不追求精确 token 数。
+6. Markdown/HTML 中的围栏代码块（```` ``` ```` / `~~~`）与 4 空格缩进代码块整体保留在块文本中，不参与标题识别；HTML 的 `<pre>` 由解析器标记为代码块，其中的 `#` 行不会被当作标题丢弃。
 
 ### 7.3 身份、去重与幂等
 
@@ -246,11 +247,11 @@ pub trait EmbeddingProvider: Send + Sync {
 - point id：UUID v5（固定命名空间），name = `{collection}:{doc_id}:{content_hash}:{chunk_index}`，可确定性重算。
 - **每次注入都做对账**（包括文本未变化的场景）：
   1. 切块后按 `doc_id + content_hash` **count** 实际 point 数；若等于本次块数，再滚动取出这些 point 的 id 集合，与本次期望的 point id 集合逐一对齐。
-  2. 若数量与 id 集合都一致：不再调用 embedding。逐块比较元数据（source/title/tags/extra）：
+  2. 若数量与 id 集合都一致：逐块比较存储的 `text` 与 `heading_path`（切块参数变化时 id 集合可能不变但块文本不同）；块文本不一致则按第 3 步重新 embedding。块文本一致时不再调用 embedding，逐块比较元数据（source/title/tags/extra）：
      - 相同 → `skipped=true`；
      - 不同 → 用 `set_payload`（filter `doc_id + content_hash`）原地更新元数据，返回 `metadata_updated=true`（不重新 embedding）。
      两种情况都继续执行第 4 步清理。
-  3. 若数量或 id 集合不一致（上次中途失败、历史脏点或切块参数变化）→ 重新 embedding 并 upsert（point id 确定性，重复写入安全）。
+  3. 若数量、id 集合或块文本不一致（上次中途失败、历史脏点或切块参数变化）→ 重新 embedding 并 upsert（point id 确定性，重复写入安全）。
   4. **清理**：upsert 全部成功后，删除 filter 为 `doc_id == X AND must_not has_id(本次 point ids)` 的 point。这同时清掉旧内容哈希的残留、同哈希但编号超出本次块数的尾块，以及历史脏数据。
 - 写入顺序保证：新 point 全部 upsert 成功后才清理旧 point；中途失败时旧数据仍在，重试即可自愈。清理失败返回 `QDRANT_ERROR`，重试会再次对账并清理。
 - 删除文档：先 count 再 delete（filter `doc_id == X`），返回删除的 point 数；不存在时返回 0（幂等）。

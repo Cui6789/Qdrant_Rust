@@ -34,6 +34,21 @@ async fn main() -> Result<()> {
         "starting kb-server"
     );
 
+    // `chunk_size` is measured in Unicode characters while `max_length` is a
+    // model token limit; one CJK character is often close to one token, so a
+    // chunk larger than the window is silently truncated by the model.
+    if config.embedding.provider == ProviderKind::Local
+        && config.ingest.chunk_size > config.embedding.local.max_length
+    {
+        tracing::warn!(
+            chunk_size = config.ingest.chunk_size,
+            max_length = config.embedding.local.max_length,
+            "ingest.chunk_size counts Unicode characters but embedding.local.max_length counts model tokens \
+             (a rough characters-to-tokens approximation, not an exact conversion); longer chunks are silently \
+             truncated. Lower ingest.chunk_size (for example 400) for CJK models such as bge-small-zh-v1.5."
+        );
+    }
+
     let store = QdrantStore::new(&config.qdrant).context("failed to build the Qdrant client")?;
     store
         .wait_ready(Duration::from_secs(config.qdrant.startup_retry_secs))

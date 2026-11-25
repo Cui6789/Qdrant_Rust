@@ -1,5 +1,7 @@
 //! HTTP handlers for the knowledge base REST API.
 
+use std::time::Duration;
+
 use axum::extract::multipart::MultipartRejection;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Multipart, Path, Query, State};
@@ -21,6 +23,10 @@ use crate::state::AppState;
 
 /// Result type used by every handler.
 type ApiResult<T> = Result<T, ApiError>;
+
+/// Upper bound for the `/health` probe so a hung Qdrant cannot keep the
+/// endpoint waiting for the global `qdrant.timeout_secs`.
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Body of `POST /v1/collections`.
 #[derive(Debug, Deserialize)]
@@ -49,8 +55,20 @@ fn rejection(error: impl IntoResponse + std::fmt::Display) -> ApiError {
 
 /// `GET /health` — Qdrant connectivity and embedding details, no auth.
 pub async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthStatus>) {
-    let mut health = state.service.health().await;
-    health.embedding = state.embedding.clone();
+    let health = match tokio::time::timeout(HEALTH_TIMEOUT, state.service.health()).await {
+        Ok(mut health) => {
+            health.embedding = state.embedding.clone();
+            health
+        }
+        Err(_) => {
+            tracing::warn!("health check timed out after {HEALTH_TIMEOUT:?}");
+            HealthStatus {
+                status: "degraded".to_string(),
+                qdrant: "unavailable".to_string(),
+                embedding: state.embedding.clone(),
+            }
+        }
+    };
     let status = if health.status == "ok" {
         StatusCode::OK
     } else {

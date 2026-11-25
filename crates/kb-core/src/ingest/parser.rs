@@ -98,6 +98,21 @@ fn html_to_text(html: &str) -> String {
                     } else {
                         match tag {
                             "script" | "style" | "noscript" | "head" | "title" => continue,
+                            "pre" => {
+                                let content = scraper::ElementRef::wrap(node)
+                                    .map(|pre| pre.text().collect::<String>())
+                                    .unwrap_or_default();
+                                push_block_break(&mut output);
+                                // Mark `<pre>` content as a fenced code block so the
+                                // chunker keeps `#`-prefixed lines as content instead
+                                // of interpreting them as headings.
+                                output.push_str("```\n");
+                                output.push_str(content.trim_matches('\n'));
+                                output.push('\n');
+                                output.push_str("```");
+                                push_block_break(&mut output);
+                                continue;
+                            }
                             "li" => {
                                 push_line_break(&mut output);
                                 output.push_str("- ");
@@ -301,6 +316,24 @@ mod tests {
 
         let parsed = parse_text("<p>Hello</p>World", DocumentFormat::Html).expect("html parses");
         assert_eq!(parsed, "Hello\nWorld");
+    }
+
+    #[test]
+    fn html_preserves_pre_content() {
+        let html = "<h1>Code</h1><pre># not a heading\nif ready:\n    print(1)</pre>";
+        let parsed = parse_text(html, DocumentFormat::Html).expect("html parses");
+        assert!(
+            parsed.contains("# not a heading"),
+            "pre content dropped: {parsed:?}"
+        );
+        assert!(
+            parsed.contains("if ready:"),
+            "pre content dropped: {parsed:?}"
+        );
+        assert!(
+            parsed.contains("print(1)"),
+            "pre content dropped: {parsed:?}"
+        );
     }
 
     #[test]

@@ -97,8 +97,25 @@ fn split_sections(text: &str, headings_enabled: bool) -> Vec<Section> {
     let mut stack: Vec<(usize, String)> = Vec::new();
     let mut heading_path = String::new();
     let mut body = String::new();
+    let mut fence: Option<Fence> = None;
 
     for line in text.lines() {
+        // Everything inside a fenced block is content, including lines that
+        // start with `#`; only a matching closing fence ends the block.
+        if let Some(open) = fence {
+            body.push_str(line);
+            body.push('\n');
+            if is_closing_fence(line, open) {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(open) = opening_fence(line) {
+            body.push_str(line);
+            body.push('\n');
+            fence = Some(open);
+            continue;
+        }
         if let Some((level, title)) = parse_heading(line) {
             push_section(&mut sections, &heading_path, &mut body);
             while stack
@@ -122,6 +139,49 @@ fn split_sections(text: &str, headings_enabled: bool) -> Vec<Section> {
     sections
 }
 
+/// An open Markdown code fence (` ``` ` or `~~~`) tracked while sectioning.
+#[derive(Debug, Clone, Copy)]
+struct Fence {
+    marker: char,
+    length: usize,
+}
+
+/// Recognizes an opening fence: up to three leading spaces, then three or more
+/// backticks or tildes. A backtick fence's info string may not contain a
+/// backtick (CommonMark), so such lines are treated as ordinary content.
+fn opening_fence(line: &str) -> Option<Fence> {
+    let indent = line.chars().take_while(|&ch| ch == ' ').count();
+    if indent >= 4 {
+        return None;
+    }
+    // Indentation consists of ASCII spaces, so `indent` is a valid byte offset.
+    let rest = &line[indent..];
+    let marker = rest.chars().next()?;
+    if marker != '`' && marker != '~' {
+        return None;
+    }
+    let length = rest.chars().take_while(|&ch| ch == marker).count();
+    if length < 3 {
+        return None;
+    }
+    if marker == '`' && rest.chars().skip(length).any(|ch| ch == '`') {
+        return None;
+    }
+    Some(Fence { marker, length })
+}
+
+/// Returns whether `line` closes `fence`: the same marker, at least as many
+/// times, with only whitespace after it and at most three leading spaces.
+fn is_closing_fence(line: &str, fence: Fence) -> bool {
+    let indent = line.chars().take_while(|&ch| ch == ' ').count();
+    if indent >= 4 {
+        return false;
+    }
+    let rest = &line[indent..];
+    let length = rest.chars().take_while(|&ch| ch == fence.marker).count();
+    length >= fence.length && rest.chars().skip(length).all(char::is_whitespace)
+}
+
 /// Flushes the accumulated body when it holds non-whitespace text.
 fn push_section(sections: &mut Vec<Section>, heading_path: &str, body: &mut String) {
     let trimmed = body.trim();
@@ -135,7 +195,14 @@ fn push_section(sections: &mut Vec<Section>, heading_path: &str, body: &mut Stri
 }
 
 /// Parses an ATX heading line (`#` .. `######` plus a title).
+///
+/// Lines with four or more leading spaces (or a leading tab) are indented code
+/// blocks, not headings; at most three spaces of indentation are allowed.
 fn parse_heading(line: &str) -> Option<(usize, String)> {
+    let leading_spaces = line.chars().take_while(|&ch| ch == ' ').count();
+    if leading_spaces >= 4 || line.starts_with('\t') {
+        return None;
+    }
     let trimmed = line.trim_start();
     let level = trimmed.chars().take_while(|&ch| ch == '#').count();
     if level == 0 || level > 6 {
@@ -464,6 +531,79 @@ mod tests {
                 "heading line leaked into chunk: {chunk:?}"
             );
         }
+    }
+
+    #[test]
+    fn fenced_code_comments_are_content_not_headings() {
+        let text = r#"# Install
+
+```bash
+# install dependencies
+sudo apt-get update
+```
+
+## Usage
+
+```python
+# print a greeting
+print("hello")
+```"#;
+        let chunks = chunk_document(text, DocumentFormat::Markdown, &config(1000, 0, 0))
+            .expect("markdown chunks");
+
+        assert_eq!(chunks.len(), 2, "unexpected chunks: {chunks:?}");
+        assert_eq!(chunks[0].heading_path, "Install");
+        assert_eq!(chunks[1].heading_path, "Install > Usage");
+        assert!(
+            chunks[0].text.contains("# install dependencies"),
+            "shell comment dropped: {chunks:?}"
+        );
+        assert!(
+            chunks[1].text.contains("# print a greeting"),
+            "python comment dropped: {chunks:?}"
+        );
+        // The fence lines themselves are content and must survive.
+        assert!(chunks[0].text.contains("```bash"), "{chunks:?}");
+        assert!(chunks[1].text.contains("```python"), "{chunks:?}");
+        for chunk in &chunks {
+            assert!(
+                !chunk.heading_path.contains("install dependencies")
+                    && !chunk.heading_path.contains("print a greeting"),
+                "fenced comment leaked into the heading path: {chunk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn indented_code_is_content_not_a_heading() {
+        let text = "# Section\n\n    # not a heading\n    echo hello";
+        let chunks = chunk_document(text, DocumentFormat::Markdown, &config(1000, 0, 0))
+            .expect("markdown chunks");
+
+        assert_eq!(chunks.len(), 1, "unexpected chunks: {chunks:?}");
+        assert_eq!(chunks[0].heading_path, "Section");
+        assert!(
+            chunks[0].text.contains("# not a heading"),
+            "indented code dropped: {chunks:?}"
+        );
+        assert!(chunks[0].text.contains("echo hello"), "{chunks:?}");
+    }
+
+    #[test]
+    fn html_pre_code_comments_are_content_not_headings() {
+        let html = "<h1>Code</h1><pre># not a heading\nprint(1)</pre>";
+        let parsed =
+            crate::ingest::parser::parse_text(html, DocumentFormat::Html).expect("html parses");
+        let chunks = chunk_document(&parsed, DocumentFormat::Html, &config(1000, 0, 0))
+            .expect("html chunks");
+
+        assert_eq!(chunks.len(), 1, "unexpected chunks: {chunks:?}");
+        assert_eq!(chunks[0].heading_path, "Code");
+        assert!(
+            chunks[0].text.contains("# not a heading"),
+            "pre content dropped: {chunks:?}"
+        );
+        assert!(chunks[0].text.contains("print(1)"), "{chunks:?}");
     }
 
     #[test]

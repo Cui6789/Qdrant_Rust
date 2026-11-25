@@ -10,7 +10,8 @@ use axum::routing::{get, post};
 use axum::Router;
 use kb_core::error::KbError;
 use tower_http::timeout::TimeoutLayer;
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tracing::Level;
 
 use crate::api::handlers;
 use crate::error::{rewrite_status_envelopes, ApiError};
@@ -44,7 +45,14 @@ pub fn with_common_layers(router: Router, max_body_bytes: usize, timeout: Durati
             timeout,
         ))
         .layer(middleware::map_response(rewrite_status_envelopes))
-        .layer(TraceLayer::new_for_http())
+        // The default TraceLayer levels are DEBUG/TRACE, which the documented
+        // `RUST_LOG=info,kb_core=debug` default would not show. Emit the request
+        // span (method/path) and the completion event (status/latency) at INFO.
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+        )
 }
 
 /// Routes under `/v1`; authentication is applied by the caller.

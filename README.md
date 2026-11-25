@@ -123,6 +123,12 @@ curl.exe -s http://localhost:8080/health
 - 停止服务：`docker compose down`（两个 `./data` 目录会保留，重启后数据仍在）。
 - 查看日志：`docker compose logs -f kb-server`。
 
+> **安全警告：不要在没有鉴权的情况下把 Qdrant 暴露到网络。** 默认 compose 只把
+> Dashboard/REST 端口绑定到 `127.0.0.1:6333`，并且**不发布** gRPC 端口 6334
+> （`kb-server` 通过 Compose 内部网络访问 `http://qdrant:6334`）。Qdrant 本身默认
+> 无鉴权；如果确需远程访问，必须为它配置 API key、TLS 或前置一个鉴权代理，
+> 并且不要用 `0.0.0.0` 直接发布端口。
+
 ## 配置说明
 
 配置加载顺序（后者覆盖前者）：
@@ -166,6 +172,14 @@ curl.exe -s http://localhost:8080/health
 | `ingest.chunk_overlap` | `120` | `KB_INGEST__CHUNK_OVERLAP` | 相邻块重叠字符数，必须 < `chunk_size` |
 | `ingest.min_chunk_size` | `30` | `KB_INGEST__MIN_CHUNK_SIZE` | 小于该值的尾块尝试并入前块 |
 | `ingest.upsert_batch_size` | `64` | `KB_INGEST__UPSERT_BATCH_SIZE` | 写入 Qdrant 的批大小 |
+
+> **注意 `ingest.chunk_size` 与 `embedding.local.max_length` 的单位不同：**
+> `chunk_size` 按 **Unicode 字符**计数，`max_length` 是模型的 **token** 上限。
+> 对中文等 CJK 文本，一个字符通常接近一个 token（这是粗略估算，并非精确换算）。
+> 默认 `chunk_size = 800` 大于默认 `max_length = 512`，超长块会被本地模型**静默截断**，
+> 块尾内容不参与 embedding。使用 CJK 本地模型时建议把 `chunk_size` 降到 `400` 左右
+> （并重新注入已有文档）；服务启动时如果 `provider=local` 且 `chunk_size > max_length`
+> 会打印 WARN 日志。
 
 > 环境变量命名规则：`section.key` → `KB_SECTION__KEY`（全大写、层级用双下划线、键名内的下划线保留），例如 `embedding.api.api_key` → `KB_EMBEDDING__API__API_KEY`。布尔值用 `true` / `false`。
 
@@ -412,7 +426,7 @@ curl.exe -s -X POST http://localhost:8080/v1/collections/docs/documents `
 ```json
 {
   "doc_id": "handbook",
-  "chunks": 3,
+  "chunks": 1,
   "skipped": false,
   "metadata_updated": false,
   "content_hash": "…sha256…",
@@ -497,7 +511,7 @@ curl.exe -s -X POST http://localhost:8080/v1/collections/docs/search `
     {
       "score": 0.83,
       "doc_id": "handbook",
-      "chunk_index": 1,
+      "chunk_index": 0,
       "text": "年假需在 HR 系统提交申请，审批通过后生效。",
       "metadata": {
         "source": "handbook.md",
@@ -536,7 +550,7 @@ curl.exe -s -X DELETE -G http://localhost:8080/v1/collections/docs/documents `
 响应 `200`：
 
 ```json
-{"doc_id":"handbook","deleted_points":3}
+{"doc_id":"handbook","deleted_points":1}
 ```
 
 文档不存在时返回 `deleted_points: 0`（幂等）；集合不存在返回 `404`。
@@ -590,6 +604,7 @@ curl.exe -s -X DELETE -G http://localhost:8080/v1/collections/docs/documents `
 
 - 所有长度均按 **Unicode 字符（scalar value）** 计算，不是字节或 token，对中文友好。
 - `markdown` 与 `html`：Markdown 风格 `#` 标题行划分 section 并维护 `heading_path`（如 `第二章 > 休假制度`）；标题行本身不进入块文本。HTML 解析会把 `h1`–`h6` 转成对应 `#` 行。
+- Markdown 围栏代码块（```` ``` ```` / `~~~`）与 4 空格缩进代码块整体保留在块文本中，其中的 `#` 行不会被当作标题；HTML 的 `<pre>` 由解析器标记为代码块，同样保留。
 - `text` 与 `json`：整篇作为单个 section，不解析标题。
 - section 内按空行分段；超过 `chunk_size` 的段落按句末标点（`。！？!?.\n`）切分，仍超长则硬切。
 - 相邻块保留 `chunk_overlap` 个字符的重叠；不同 section 之间不重叠。
@@ -603,8 +618,8 @@ curl.exe -s -X DELETE -G http://localhost:8080/v1/collections/docs/documents `
 - point id 是确定性 UUID v5：`{collection}:{doc_id}:{content_hash}:{chunk_index}`（固定命名空间）。
 - **每次注入都会对账**（即使文本未变）：
   1. 按 `doc_id + content_hash` 统计实际 point 数；若等于本次块数，再取出 id 集合与本次期望集合逐一比较；
-  2. 数量与 id 集合都一致时：比较 `source`/`title`/`tags`/`extra`。完全相同 → `skipped=true`；仅有元数据变化 → 用 `set_payload` 原地更新，返回 `metadata_updated=true`，不调用 embedding；
-  3. 数量或 id 集合不一致（上次中途失败、历史脏点、切块参数变化）→ 重新 embedding 并按确定性 id upsert；
+  2. 数量与 id 集合都一致时：先逐块比较存储的 `text` 与 `heading_path` 与本次切块结果（id 只包含内容哈希和块序号，切块参数变化时 id 集合可能不变但文本不同）；文本一致后再比较 `source`/`title`/`tags`/`extra`。全部相同 → `skipped=true`；仅有元数据变化 → 用 `set_payload` 原地更新，返回 `metadata_updated=true`，不调用 embedding；
+  3. 数量、id 集合或块文本不一致（上次中途失败、历史脏点、切块参数变化）→ 重新 embedding 并按确定性 id upsert；
   4. 写入成功后清理：删除 `doc_id == X AND must_not has_id(本次所有 id)` 的 point，清除旧内容哈希残留、同哈希超出的尾块和历史脏数据。
 - 写入顺序为「**先新后清**」：中途失败时旧数据仍在，客户端重试即可收敛到完整状态。
 - 删除文档：先 count 再按 `doc_id` 删除，返回实际删除数；重复删除返回 0。
@@ -813,7 +828,7 @@ cargo test -p kb-core embeds_chinese_text_with_bge_small_zh -- --ignored --nocap
 - **6333**：Qdrant 的 REST API 与 Web Dashboard（`http://localhost:6333/dashboard`）。
 - **6334**：Qdrant 的 gRPC 接口，本服务使用它。
 - `KB_QDRANT__URL` 必须指向 gRPC 端口（默认 `http://localhost:6334`）。误配成 6333 会在启动/健康检查时报 Qdrant 连接错误。
-- Docker Compose 同时发布 6333 和 6334，便于用 Dashboard 查看数据。
+- Docker Compose 只把 Dashboard/REST 发布到 `127.0.0.1:6333`（便于本机查看数据），gRPC 6334 不发布到宿主机；`kb-server` 通过 Compose 网络访问 `http://qdrant:6334`。
 
 ### 本地模型下载失败 / 很慢
 

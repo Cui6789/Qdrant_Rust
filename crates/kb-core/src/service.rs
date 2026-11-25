@@ -150,31 +150,40 @@ impl KnowledgeBaseService {
                     .store
                     .scroll_payloads(collection, current_filter.clone(), chunk_count as u32 + 1)
                     .await?;
-                let metadata_changed = payloads.len() != chunk_count
-                    || payloads
+                // Point ids only encode the content hash and chunk index, so a
+                // changed chunking configuration (size/overlap/min size) can
+                // keep the same id set while producing different chunk text.
+                // Compare the stored text and heading path before skipping.
+                let chunks_match = payloads.len() == chunk_count
+                    && payloads
+                        .iter()
+                        .all(|payload| chunk_payload_matches(payload, &chunks));
+                if chunks_match {
+                    let metadata_changed = payloads
                         .iter()
                         .any(|payload| !metadata_matches(payload, &input.metadata));
-                let metadata_updated = if metadata_changed {
-                    self.store
-                        .set_metadata_payload(
-                            collection,
-                            current_filter,
-                            metadata_payload(&input.metadata),
-                        )
-                        .await?;
-                    true
-                } else {
-                    false
-                };
-                self.cleanup_stale(collection, &doc_id, &ids).await?;
-                return Ok(IngestResult {
-                    doc_id,
-                    chunks: chunk_count,
-                    skipped: !metadata_updated,
-                    metadata_updated,
-                    content_hash,
-                    embedding_model,
-                });
+                    let metadata_updated = if metadata_changed {
+                        self.store
+                            .set_metadata_payload(
+                                collection,
+                                current_filter,
+                                metadata_payload(&input.metadata),
+                            )
+                            .await?;
+                        true
+                    } else {
+                        false
+                    };
+                    self.cleanup_stale(collection, &doc_id, &ids).await?;
+                    return Ok(IngestResult {
+                        doc_id,
+                        chunks: chunk_count,
+                        skipped: !metadata_updated,
+                        metadata_updated,
+                        content_hash,
+                        embedding_model,
+                    });
+                }
             }
         }
 
@@ -500,6 +509,28 @@ fn metadata_matches(
             |extra| extra == &metadata.extra,
         );
     source_matches && title_matches && tags_match && extra_matches
+}
+
+/// Compares a stored payload's chunk text and heading path with the freshly
+/// chunked values. A payload without a usable `chunk_index` never matches.
+fn chunk_payload_matches(
+    payload: &serde_json::Map<String, serde_json::Value>,
+    chunks: &[Chunk],
+) -> bool {
+    let Some(chunk) = payload
+        .get("chunk_index")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|index| usize::try_from(index).ok())
+        .and_then(|index| chunks.get(index))
+    else {
+        return false;
+    };
+    payload.get("text").and_then(serde_json::Value::as_str) == Some(chunk.text.as_str())
+        && payload
+            .get("heading_path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            == chunk.heading_path.as_str()
 }
 
 /// Extracts the search-hit metadata from a stored payload without panicking.

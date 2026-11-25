@@ -34,6 +34,11 @@ timeout_secs = 60
 max_retries = 3
 
 [ingest]
+# 注意：chunk_size 按 Unicode 字符计数，而 [embedding.local].max_length 是模型的
+# token 上限。对中文等 CJK 文本，一个字符通常接近一个 token（粗略估算，并非精确
+# 换算）；默认 800 字符大于默认 512 token，超长块会被本地模型静默截断。
+# 使用 CJK 本地模型时建议把 chunk_size 降到 400 左右，并重新注入已有文档。
+# provider=local 且 chunk_size > max_length 时，服务启动会打印 WARN 日志。
 chunk_size = 800              # 字符数
 chunk_overlap = 120
 min_chunk_size = 30
