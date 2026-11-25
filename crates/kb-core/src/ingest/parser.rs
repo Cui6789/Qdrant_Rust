@@ -70,44 +70,60 @@ pub fn parse_text(text: &str, format: DocumentFormat) -> Result<String> {
     Ok(parsed.trim().to_owned())
 }
 
+/// Work items for the non-recursive HTML walk. `Close*` items are pushed before
+/// a node's children so the boundary break is emitted after the whole subtree.
+enum HtmlTask<N> {
+    Node(N),
+    CloseHeading,
+    CloseBlock,
+}
+
 /// Converts HTML into line-oriented text, rewriting headings and list items.
+/// Head metadata (`head`/`title`) is not visible body text and is skipped.
 fn html_to_text(html: &str) -> String {
     let document = Html::parse_document(html);
     let mut output = String::new();
-    let mut stack = vec![document.tree.root()];
+    let mut stack: Vec<HtmlTask<_>> = vec![HtmlTask::Node(document.tree.root())];
 
-    while let Some(node) = stack.pop() {
-        match node.value() {
-            Node::Element(element) => {
-                let tag = element.name();
-                if let Some(level) = heading_level(tag) {
-                    push_block_break(&mut output);
-                    output.push_str(&"#".repeat(level));
-                    output.push(' ');
-                } else {
-                    match tag {
-                        "script" | "style" | "noscript" => continue,
-                        "li" => {
-                            push_line_break(&mut output);
-                            output.push_str("- ");
+    while let Some(task) = stack.pop() {
+        match task {
+            HtmlTask::Node(node) => match node.value() {
+                Node::Element(element) => {
+                    let tag = element.name();
+                    if let Some(level) = heading_level(tag) {
+                        push_block_break(&mut output);
+                        output.push_str(&"#".repeat(level));
+                        output.push(' ');
+                        stack.push(HtmlTask::CloseHeading);
+                    } else {
+                        match tag {
+                            "script" | "style" | "noscript" | "head" | "title" => continue,
+                            "li" => {
+                                push_line_break(&mut output);
+                                output.push_str("- ");
+                            }
+                            "br" => {
+                                push_line_break(&mut output);
+                                continue;
+                            }
+                            "p" | "div" | "section" | "article" | "header" | "footer" | "ul"
+                            | "ol" | "table" | "tr" => {
+                                push_block_break(&mut output);
+                                stack.push(HtmlTask::CloseBlock);
+                            }
+                            _ => {}
                         }
-                        "br" => {
-                            push_line_break(&mut output);
-                            continue;
-                        }
-                        "p" | "div" | "section" | "article" | "header" | "footer" | "ul" | "ol"
-                        | "table" | "tr" => push_block_break(&mut output),
-                        _ => {}
                     }
+                    let children: Vec<_> = node.children().collect();
+                    stack.extend(children.into_iter().rev().map(HtmlTask::Node));
                 }
-                let children: Vec<_> = node.children().collect();
-                stack.extend(children.into_iter().rev());
-            }
-            Node::Text(text) => push_text(&mut output, &text.text),
-            _ => {
-                let children: Vec<_> = node.children().collect();
-                stack.extend(children.into_iter().rev());
-            }
+                Node::Text(text) => push_text(&mut output, &text.text),
+                _ => {
+                    let children: Vec<_> = node.children().collect();
+                    stack.extend(children.into_iter().rev().map(HtmlTask::Node));
+                }
+            },
+            HtmlTask::CloseHeading | HtmlTask::CloseBlock => push_line_break(&mut output),
         }
     }
 
@@ -258,6 +274,33 @@ mod tests {
         assert!(parsed.contains("条目"), "missing list item: {parsed:?}");
         assert!(!parsed.contains("p{}"), "style leaked: {parsed:?}");
         assert!(!parsed.contains("bad()"), "script leaked: {parsed:?}");
+    }
+
+    #[test]
+    fn html_excludes_head_and_title_text() {
+        let html = "<html><head><title>页面标题</title></head><body><p>正文</p></body></html>";
+        let parsed = parse_text(html, DocumentFormat::Html).expect("html parses");
+        assert!(
+            !parsed.contains("页面标题"),
+            "title leaked into body text: {parsed:?}"
+        );
+        assert!(parsed.contains("正文"), "missing body text: {parsed:?}");
+
+        let title_only = "<html><head><title>页面标题</title></head><body></body></html>";
+        let result = parse_text(title_only, DocumentFormat::Html);
+        assert!(
+            matches!(result, Err(KbError::Validation(_))),
+            "expected validation error for title-only page, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn html_keeps_inline_text_after_headings_and_blocks_on_separate_lines() {
+        let parsed = parse_text("<h1>Title</h1>Intro", DocumentFormat::Html).expect("html parses");
+        assert_eq!(parsed, "# Title\nIntro");
+
+        let parsed = parse_text("<p>Hello</p>World", DocumentFormat::Html).expect("html parses");
+        assert_eq!(parsed, "Hello\nWorld");
     }
 
     #[test]
