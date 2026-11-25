@@ -1,0 +1,40 @@
+[server]
+host = "0.0.0.0"
+port = 8080
+api_key = ""                  # 非空则要求 Authorization: Bearer <key>
+max_body_mb = 32
+request_timeout_secs = 300
+
+[qdrant]
+url = "http://localhost:6334" # gRPC 端口（REST 6333 不用于 CRUD）
+api_key = ""
+timeout_secs = 30
+startup_retry_secs = 30       # 启动时等待 Qdrant 就绪
+
+[embedding]
+provider = "local"            # local | api
+batch_size = 32
+max_concurrent_batches = 4
+
+[embedding.local]
+model = "bge-small-zh-v1.5"
+cache_dir = "./data/models"
+show_download_progress = true
+max_length = 512
+warmup = true
+query_prefix = ""             # 留空使用模型默认前缀
+document_prefix = ""
+
+[embedding.api]
+base_url = "https://api.openai.com/v1"
+api_key = ""
+model = "text-embedding-3-small"
+dimensions = 0                # 0 = 探针获取
+timeout_secs = 60
+max_retries = 3
+
+[ingest]
+chunk_size = 800              # 字符数
+chunk_overlap = 120
+min_chunk_size = 30
+upsert_batch_size = 64
