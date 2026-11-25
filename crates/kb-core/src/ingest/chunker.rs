@@ -189,10 +189,13 @@ fn chunk_section(body: &str, heading_path: &str, config: &IngestConfig) -> Vec<C
                 continue;
             }
 
-            // Prefer starting the next chunk with this whole piece: overlap
-            // plus the piece must fit within a single chunk.
+            // Prefer starting the next chunk with this whole piece, but only
+            // once this chunk holds real content beyond the carried overlap.
             let next_overlap = config.chunk_overlap.min(current.len());
-            if current.len() > overlap_prefix_len && front_len + next_overlap <= config.chunk_size {
+            let has_new_content = current[overlap_prefix_len..]
+                .iter()
+                .any(|character| !character.is_whitespace());
+            if has_new_content && front_len + next_overlap <= config.chunk_size {
                 break;
             }
 
@@ -215,7 +218,9 @@ fn chunk_section(body: &str, heading_path: &str, config: &IngestConfig) -> Vec<C
             .collect::<String>()
             .trim_end()
             .to_owned();
-        if text.is_empty() {
+        // Skip chunks that hold nothing beyond the carried overlap (for
+        // example, an overlap followed only by a trimmed paragraph break).
+        if text.chars().count() <= overlap_prefix_len {
             continue;
         }
         previous = Some(text.clone());
@@ -381,7 +386,11 @@ mod tests {
 
     #[test]
     fn long_chinese_text_splits_within_limit_and_overlaps() {
-        let text = "中".repeat(60);
+        // Distinct CJK characters: a missing overlap cannot pass the prefix
+        // assertion by coincidence.
+        let text: String = (0u32..60)
+            .map(|offset| char::from_u32(0x4E00 + offset).expect("valid CJK scalar"))
+            .collect();
         let chunks =
             chunk_document(&text, DocumentFormat::Text, &config(20, 5, 5)).expect("text chunks");
         assert!(chunks.len() > 1, "expected multiple chunks, got {chunks:?}");
@@ -398,6 +407,39 @@ mod tests {
                 "{:?} does not start with the last five chars of {:?}",
                 pair[1],
                 pair[0]
+            );
+        }
+    }
+
+    #[test]
+    fn overlap_only_chunk_is_not_emitted() {
+        let text = "abcdefghij\n\nklmn";
+        let chunks =
+            chunk_document(text, DocumentFormat::Text, &config(10, 5, 5)).expect("text chunks");
+        assert!(
+            chunks.len() >= 2,
+            "expected multiple chunks, got {chunks:?}"
+        );
+        assert_eq!(chunks[0].text, "abcdefghij");
+        for chunk in &chunks {
+            assert!(
+                chunk.text.chars().count() <= 10,
+                "chunk exceeds the limit: {chunk:?}"
+            );
+        }
+        for pair in chunks.windows(2) {
+            let prefix = tail(&pair[0].text, 5);
+            assert!(
+                pair[1].text.starts_with(&prefix),
+                "{:?} does not start with the last five chars of {:?}",
+                pair[1],
+                pair[0]
+            );
+            let new_content: String = pair[1].text.chars().skip(prefix.chars().count()).collect();
+            assert!(
+                !new_content.is_empty(),
+                "chunk holds only the carried overlap: {:?}",
+                pair[1]
             );
         }
     }
