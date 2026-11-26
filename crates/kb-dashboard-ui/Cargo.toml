@@ -3,7 +3,7 @@ name = "kb-dashboard-ui"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.92"
-description = "Yew/WASM frontend for the Qdrant_Rust visual dashboard."
+description = "Reusable Yew/WASM dashboard UI and app for Qdrant_Rust."
 
 [workspace]
 

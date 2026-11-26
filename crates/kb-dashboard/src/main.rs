@@ -1,47 +1,17 @@
-//! Visual dashboard for the Qdrant_Rust knowledge base.
+//! Launcher for the Qdrant_Rust visual dashboard.
 //!
-//! Runs a small Axum API, reuses the `kb-core` pipeline, and serves the Yew
-//! WebAssembly frontend from `crates/kb-dashboard-ui/dist`.
-
-mod dashscope;
-mod error;
-mod handlers;
-mod pipeline;
-mod state;
+//! The HTTP surface and reusable state live in the library crate
+//! (`src/lib.rs`); this file only parses startup arguments, probes Qdrant,
+//! builds the router and serves it.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use axum::extract::DefaultBodyLimit;
-use axum::http::StatusCode;
-use axum::middleware;
-use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{delete, get, post};
-use axum::{Json, Router};
-use chrono::Utc;
 use kb_core::config::AppConfig;
-use kb_core::store::QdrantStore;
-use kb_dashboard_types::EmbeddingDefaults;
-use serde_json::json;
-use state::{AppState, EmbeddingRuntime, JobStore};
+use kb_dashboard::{build_app, resolve_ui_dir, AppState, DEFAULT_HOST, DEFAULT_PORT};
 use tokio::net::TcpListener;
-use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::{ServeDir, ServeFile};
-use tower_http::timeout::TimeoutLayer;
-use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
-use tracing::Level;
 use tracing_subscriber::EnvFilter;
-
-/// Default port of the dashboard (kept separate from kb-server's 8080).
-const DEFAULT_PORT: u16 = 8090;
-/// Default bind address: loopback only, because the API can hold an API key.
-const DEFAULT_HOST: &str = "127.0.0.1";
-/// Maximum JSON request body accepted by the dashboard.
-const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
-/// Upper bound for a synchronous dashboard request (search/embedding probe).
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Command-line arguments.
 struct Args {
@@ -55,8 +25,8 @@ async fn main() -> Result<()> {
     init_tracing();
     let args = parse_args()?;
     let config = AppConfig::load(args.config.as_deref()).context("加载配置失败")?;
-
-    let store = Arc::new(QdrantStore::new(&config.qdrant).context("创建 Qdrant 客户端失败")?);
+    let state = AppState::from_config(&config)?;
+    let store = state.store.clone();
 
     // The dashboard must stay usable while Qdrant is down: probe once, log,
     // and let the UI surface the degraded state instead of exiting.
@@ -83,27 +53,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    let state = AppState {
-        store,
-        qdrant_url: config.qdrant.url.clone(),
-        qdrant_api_key_configured: !config.qdrant.api_key.trim().is_empty(),
-        ingest: config.ingest.clone(),
-        embedding: Arc::new(tokio::sync::RwLock::new(EmbeddingRuntime::default())),
-        defaults: EmbeddingDefaults {
-            base_url: config.embedding.api.base_url.clone(),
-            model: config.embedding.api.model.clone(),
-            dimensions: config.embedding.api.dimensions,
-        },
-        embedding_timeout_secs: config.embedding.api.timeout_secs,
-        embedding_max_retries: config.embedding.api.max_retries,
-        embedding_batch_size: config.embedding.batch_size,
-        embedding_max_concurrent_batches: config.embedding.max_concurrent_batches,
-        jobs: Arc::new(Mutex::new(JobStore::default())),
-        started_instant: Instant::now(),
-        started_at: Utc::now(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-    };
-
     let ui_dir = resolve_ui_dir();
     let index = ui_dir.join("index.html");
     if !index.exists() {
@@ -113,18 +62,7 @@ async fn main() -> Result<()> {
         );
     }
 
-    let api = build_api(state.clone());
-    let app = if index.exists() {
-        let static_files = ServeDir::new(&ui_dir).fallback(ServeFile::new(&index));
-        Router::new()
-            .nest("/api", api)
-            .fallback_service(static_files)
-    } else {
-        Router::new()
-            .nest("/api", api)
-            .route("/", get(missing_ui_page))
-            .fallback(missing_ui_page)
-    };
+    let app = build_app(state.clone(), &ui_dir);
 
     let address = format!("{}:{}", args.host, args.port);
     let listener = TcpListener::bind(&address)
@@ -150,118 +88,6 @@ async fn main() -> Result<()> {
         .context("HTTP server failed")?;
     tracing::info!("kb-dashboard stopped");
     Ok(())
-}
-
-/// Builds the `/api` router.
-fn build_api(state: AppState) -> Router {
-    let router = Router::new()
-        .route("/health", get(handlers::health))
-        .route("/overview", get(handlers::overview))
-        .route(
-            "/collections",
-            get(handlers::list_collections).post(handlers::create_collection),
-        )
-        .route("/collections/{name}", delete(handlers::delete_collection))
-        .route(
-            "/collections/{name}/documents",
-            get(handlers::list_documents),
-        )
-        .route(
-            "/collections/{name}/document",
-            get(handlers::document_detail).delete(handlers::delete_document),
-        )
-        .route("/collections/{name}/search", post(handlers::search))
-        .route(
-            "/embedding/config",
-            get(handlers::get_embedding_config)
-                .post(handlers::set_embedding_config)
-                .delete(handlers::clear_embedding_config),
-        )
-        .route("/embedding/mock", post(handlers::set_mock_embedding))
-        .route("/pipeline/run", post(handlers::run_pipeline))
-        .route("/pipeline/jobs/{id}", get(handlers::get_pipeline_job))
-        .with_state(state);
-
-    router
-        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            REQUEST_TIMEOUT,
-        ))
-        .layer(middleware::map_response(rewrite_status_envelopes))
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
-                .on_response(DefaultOnResponse::new().level(Level::INFO)),
-        )
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
-}
-
-/// Rewrites empty middleware responses (408/413) into the shared envelope.
-async fn rewrite_status_envelopes(response: Response) -> Response {
-    let (code, message) = match response.status() {
-        StatusCode::REQUEST_TIMEOUT => ("REQUEST_TIMEOUT", "请求超时"),
-        StatusCode::PAYLOAD_TOO_LARGE => ("PAYLOAD_TOO_LARGE", "请求体过大"),
-        _ => return response,
-    };
-    (
-        response.status(),
-        Json(json!({"error": {"code": code, "message": message}})),
-    )
-        .into_response()
-}
-
-/// Landing page shown when the frontend bundle has not been built yet.
-async fn missing_ui_page() -> Html<&'static str> {
-    Html(
-        r#"<!doctype html>
-<html lang="zh-CN">
-<head><meta charset="utf-8"><title>Qdrant_Rust Studio</title>
-<style>
-body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f5f5f7;color:#1d1d1f;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}
-main{max-width:640px;padding:48px;background:#fff;border-radius:28px;box-shadow:0 20px 60px rgba(0,0,0,.08)}
-h1{font-size:32px;letter-spacing:-.02em;margin:0 0 12px}
-p{color:#6e6e73;line-height:1.6}
-code{background:#f5f5f7;padding:4px 8px;border-radius:8px;font-size:14px}
-</style></head>
-<body><main>
-<h1>前端尚未构建</h1>
-<p>Rust API 已在运行，但没有找到 <code>crates/kb-dashboard-ui/dist/index.html</code>。</p>
-<p>在仓库根目录执行：</p>
-<p><code>cd crates/kb-dashboard-ui &amp;&amp; trunk build --release</code></p>
-<p>然后刷新此页面。</p>
-</main></body></html>"#,
-    )
-}
-
-/// Finds the built frontend bundle.
-///
-/// Order: `DASHBOARD_UI_DIR`, the current directory layout, the crate-relative
-/// layout (when launched from `crates/kb-dashboard`), and finally the absolute
-/// location recorded at compile time.
-fn resolve_ui_dir() -> PathBuf {
-    if let Ok(raw) = std::env::var("DASHBOARD_UI_DIR") {
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
-    }
-    let candidates = [
-        PathBuf::from("crates/kb-dashboard-ui/dist"),
-        PathBuf::from("../kb-dashboard-ui/dist"),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../kb-dashboard-ui/dist"),
-    ];
-    for candidate in &candidates {
-        if candidate.join("index.html").exists() {
-            return candidate.clone();
-        }
-    }
-    candidates[0].clone()
 }
 
 /// Parses `--config`, `--host`, and `--port` (also `--key=value` forms).

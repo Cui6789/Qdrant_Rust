@@ -50,7 +50,7 @@ pub fn stat_tile(props: &StatTileProps) -> Html {
                 <span class="stat-icon">{ props.icon.clone() }</span>
                 { props.hint.as_ref().map(|hint| html! { <span class="stat-hint">{ hint.clone() }</span> }) }
             </div>
-            <div class="stat-value">{ props.value.clone() }</div>
+            <div class="stat-value" title={props.value.clone()}>{ props.value.clone() }</div>
             <div class="stat-label">{ props.label.clone() }</div>
         </div>
     }

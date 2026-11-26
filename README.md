@@ -28,6 +28,8 @@ flowchart LR
 ```
 
 - `kb-core`：配置、领域模型、Embedding trait、两种 provider、解析/切块、Qdrant 访问层、业务服务。
+  直接作为 Rust 库操作 RAG 数据库（入库、检索、滚动、删除）的参考脚本见
+  [crates/kb-core/README.md](crates/kb-core/README.md)。
 - `kb-server`：薄 HTTP 层（axum），负责鉴权、请求限制、错误映射和路由；依赖方向只有 `kb-server -> kb-core`。
 - Qdrant 通过 **gRPC（6334）** 访问；REST/Web UI 端口 6333 不用于本服务的 CRUD。
 
@@ -46,6 +48,9 @@ flowchart LR
 │   └── start-dashboard.ps1          # 一键启动 Qdrant + 可视化工作台
 ├── crates/
 │   ├── kb-core/
+│   │   ├── README.md                # RAG 模块复用与直接操作数据库脚本
+│   │   ├── examples/
+│   │   │   └── rag_operations.rs    # 建集合/入库/检索/滚动/删除的完整示例
 │   │   ├── src/
 │   │   │   ├── config.rs            # 配置加载/默认值/校验
 │   │   │   ├── error.rs             # KbError

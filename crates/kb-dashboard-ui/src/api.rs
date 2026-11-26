@@ -1,4 +1,8 @@
-//! Typed fetch helpers for the dashboard API.
+//! Typed client for the dashboard API.
+//!
+//! [`DashboardApp`](crate::DashboardApp) provides an [`ApiClient`] through Yew
+//! context. A section used on its own falls back to [`ApiClient::default`],
+//! which preserves the original same-origin behavior.
 
 use gloo_net::http::{Request, Response};
 use kb_dashboard_types::*;
@@ -27,9 +31,191 @@ impl std::fmt::Display for ApiError {
     }
 }
 
-/// Same-origin API base. During `trunk serve` on port 8081 it targets the
+/// Base URL of the dashboard API, including its `/api` suffix.
+///
+/// The default client uses the current origin. During `trunk serve` on port
+/// 8081 it targets the dashboard binary on port 8090, matching the repository's
+/// development setup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiClient {
+    base_url: String,
+}
+
+impl Default for ApiClient {
+    fn default() -> Self {
+        Self {
+            base_url: default_base(),
+        }
+    }
+}
+
+impl ApiClient {
+    /// Creates a client for an explicit API root such as
+    /// `http://127.0.0.1:8090/api`. A trailing slash is ignored.
+    pub fn new(base_url: impl Into<String>) -> Self {
+        let trimmed = base_url.into().trim().trim_end_matches('/').to_string();
+        if trimmed.is_empty() {
+            return Self::default();
+        }
+        Self { base_url: trimmed }
+    }
+
+    /// Returns the configured API root, including `/api`.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base_url, path)
+    }
+
+    async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
+        let response = Request::get(&self.url(path))
+            .send()
+            .await
+            .map_err(|error| ApiError::network(format!("网络请求失败：{error}")))?;
+        parse(response).await
+    }
+
+    async fn post<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ApiError> {
+        let request = Request::post(&self.url(path))
+            .json(body)
+            .map_err(|error| ApiError::network(format!("构造请求失败：{error}")))?;
+        let response = request
+            .send()
+            .await
+            .map_err(|error| ApiError::network(format!("网络请求失败：{error}")))?;
+        parse(response).await
+    }
+
+    async fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
+        let response = Request::delete(&self.url(path))
+            .send()
+            .await
+            .map_err(|error| ApiError::network(format!("网络请求失败：{error}")))?;
+        parse(response).await
+    }
+
+    /// `GET /api/overview`.
+    pub async fn overview(&self) -> Result<OverviewResponse, ApiError> {
+        self.get("/overview").await
+    }
+
+    /// `GET /api/embedding/config`.
+    pub async fn embedding_state(&self) -> Result<EmbeddingConfigStateResponse, ApiError> {
+        self.get("/embedding/config").await
+    }
+
+    /// `POST /api/embedding/config`.
+    pub async fn configure_embedding(
+        &self,
+        request: &EmbeddingConfigRequest,
+    ) -> Result<EmbeddingConfigResponse, ApiError> {
+        self.post("/embedding/config", request).await
+    }
+
+    /// `POST /api/embedding/mock`.
+    pub async fn configure_mock(&self) -> Result<EmbeddingStatus, ApiError> {
+        self.post(
+            "/embedding/mock",
+            &MockEmbeddingRequest {
+                dimension: Some(512),
+            },
+        )
+        .await
+    }
+
+    /// `DELETE /api/embedding/config`.
+    pub async fn clear_embedding(&self) -> Result<EmbeddingStatus, ApiError> {
+        self.delete("/embedding/config").await
+    }
+
+    /// `GET /api/collections/{collection}/documents`.
+    pub async fn documents(
+        &self,
+        collection: &str,
+        query: Option<&str>,
+        limit: u32,
+    ) -> Result<DocumentListResponse, ApiError> {
+        let mut path = format!(
+            "/collections/{}/documents?limit={}",
+            encode(collection),
+            limit
+        );
+        if let Some(query) = query.filter(|value| !value.trim().is_empty()) {
+            path.push_str("&q=");
+            path.push_str(&encode(query.trim()));
+        }
+        self.get(&path).await
+    }
+
+    /// `GET /api/collections/{collection}/document`.
+    pub async fn document_detail(
+        &self,
+        collection: &str,
+        doc_id: &str,
+    ) -> Result<DocumentDetailResponse, ApiError> {
+        self.get(&format!(
+            "/collections/{}/document?doc_id={}",
+            encode(collection),
+            encode(doc_id)
+        ))
+        .await
+    }
+
+    /// `DELETE /api/collections/{collection}/document`.
+    pub async fn delete_document(
+        &self,
+        collection: &str,
+        doc_id: &str,
+    ) -> Result<DeleteDocumentResponse, ApiError> {
+        self.delete(&format!(
+            "/collections/{}/document?doc_id={}",
+            encode(collection),
+            encode(doc_id)
+        ))
+        .await
+    }
+
+    /// `POST /api/collections/{collection}/search`.
+    pub async fn search(
+        &self,
+        collection: &str,
+        query: &str,
+        top_k: usize,
+    ) -> Result<SearchResponse, ApiError> {
+        self.post(
+            &format!("/collections/{}/search", encode(collection)),
+            &SearchRequest {
+                query: query.to_string(),
+                top_k: Some(top_k),
+                score_threshold: None,
+            },
+        )
+        .await
+    }
+
+    /// `POST /api/pipeline/run`.
+    pub async fn start_pipeline(
+        &self,
+        request: &PipelineRequest,
+    ) -> Result<PipelineStartResponse, ApiError> {
+        self.post("/pipeline/run", request).await
+    }
+
+    /// `GET /api/pipeline/jobs/{id}`.
+    pub async fn pipeline_job(&self, id: &str) -> Result<PipelineJob, ApiError> {
+        self.get(&format!("/pipeline/jobs/{}", encode(id))).await
+    }
+}
+
+/// Same-origin API root. During `trunk serve` on port 8081 it targets the
 /// dashboard binary on port 8090.
-fn base() -> String {
+fn default_base() -> String {
     let Some(window) = web_sys::window() else {
         return "/api".to_string();
     };
@@ -43,10 +229,6 @@ fn base() -> String {
             .unwrap_or_else(|_| "127.0.0.1".to_string());
         format!("http://{host}:8090/api")
     }
-}
-
-fn url(path: &str) -> String {
-    format!("{}{}", base(), path)
 }
 
 fn encode(value: &str) -> String {
@@ -78,124 +260,4 @@ async fn parse<T: DeserializeOwned>(response: Response) -> Result<T, ApiError> {
             text
         },
     })
-}
-
-async fn get<T: DeserializeOwned>(path: &str) -> Result<T, ApiError> {
-    let response = Request::get(&url(path))
-        .send()
-        .await
-        .map_err(|error| ApiError::network(format!("网络请求失败：{error}")))?;
-    parse(response).await
-}
-
-async fn post<B: Serialize, T: DeserializeOwned>(path: &str, body: &B) -> Result<T, ApiError> {
-    let request = Request::post(&url(path))
-        .json(body)
-        .map_err(|error| ApiError::network(format!("构造请求失败：{error}")))?;
-    let response = request
-        .send()
-        .await
-        .map_err(|error| ApiError::network(format!("网络请求失败：{error}")))?;
-    parse(response).await
-}
-
-async fn delete<T: DeserializeOwned>(path: &str) -> Result<T, ApiError> {
-    let response = Request::delete(&url(path))
-        .send()
-        .await
-        .map_err(|error| ApiError::network(format!("网络请求失败：{error}")))?;
-    parse(response).await
-}
-
-pub async fn overview() -> Result<OverviewResponse, ApiError> {
-    get("/overview").await
-}
-
-pub async fn embedding_state() -> Result<EmbeddingConfigStateResponse, ApiError> {
-    get("/embedding/config").await
-}
-
-pub async fn configure_embedding(
-    request: &EmbeddingConfigRequest,
-) -> Result<EmbeddingConfigResponse, ApiError> {
-    post("/embedding/config", request).await
-}
-
-pub async fn configure_mock() -> Result<EmbeddingStatus, ApiError> {
-    post(
-        "/embedding/mock",
-        &MockEmbeddingRequest {
-            dimension: Some(512),
-        },
-    )
-    .await
-}
-
-pub async fn clear_embedding() -> Result<EmbeddingStatus, ApiError> {
-    delete("/embedding/config").await
-}
-
-pub async fn documents(
-    collection: &str,
-    query: Option<&str>,
-    limit: u32,
-) -> Result<DocumentListResponse, ApiError> {
-    let mut path = format!(
-        "/collections/{}/documents?limit={}",
-        encode(collection),
-        limit
-    );
-    if let Some(query) = query.filter(|value| !value.trim().is_empty()) {
-        path.push_str("&q=");
-        path.push_str(&encode(query.trim()));
-    }
-    get(&path).await
-}
-
-pub async fn document_detail(
-    collection: &str,
-    doc_id: &str,
-) -> Result<DocumentDetailResponse, ApiError> {
-    get(&format!(
-        "/collections/{}/document?doc_id={}",
-        encode(collection),
-        encode(doc_id)
-    ))
-    .await
-}
-
-pub async fn delete_document(
-    collection: &str,
-    doc_id: &str,
-) -> Result<DeleteDocumentResponse, ApiError> {
-    delete(&format!(
-        "/collections/{}/document?doc_id={}",
-        encode(collection),
-        encode(doc_id)
-    ))
-    .await
-}
-
-pub async fn search(
-    collection: &str,
-    query: &str,
-    top_k: usize,
-) -> Result<SearchResponse, ApiError> {
-    post(
-        &format!("/collections/{}/search", encode(collection)),
-        &SearchRequest {
-            query: query.to_string(),
-            top_k: Some(top_k),
-            score_threshold: None,
-        },
-    )
-    .await
-}
-
-pub async fn start_pipeline(request: &PipelineRequest) -> Result<PipelineStartResponse, ApiError> {
-    post("/pipeline/run", request).await
-}
-
-pub async fn pipeline_job(id: &str) -> Result<PipelineJob, ApiError> {
-    get(&format!("/pipeline/jobs/{}", encode(id))).await
 }

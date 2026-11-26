@@ -10,11 +10,17 @@ use std::time::Duration;
 
 use qdrant_client::qdrant::{
     point_id::PointIdOptions, vectors_config, CountPointsBuilder, CreateCollectionBuilder,
-    DeleteCollectionBuilder, DeletePointsBuilder, Distance, Filter, PointStruct,
-    QueryPointsBuilder, ScoredPoint, ScrollPointsBuilder, SetPayloadPointsBuilder,
-    UpsertPointsBuilder, VectorParamsBuilder,
+    DeleteCollectionBuilder, DeletePointsBuilder, Distance, QueryPointsBuilder,
+    ScrollPointsBuilder, SetPayloadPointsBuilder, UpsertPointsBuilder, VectorParamsBuilder,
 };
 use qdrant_client::{Qdrant, QdrantError};
+
+// Re-export the Qdrant types that appear in this module's public API, so a
+// downstream crate can build filters and inspect raw search results without
+// adding `qdrant-client` as a direct dependency.
+pub use qdrant_client::qdrant::r#match::MatchValue;
+pub use qdrant_client::qdrant::{Condition, Filter, PointStruct, ScoredPoint};
+pub use qdrant_client::Payload;
 
 use crate::config::QdrantConfig;
 use crate::error::{KbError, Result};

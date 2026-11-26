@@ -1,3 +1,6 @@
+//! Model-access section: endpoint form, provider presets, live probe and
+//! current embedding status.
+
 use kb_dashboard_types::{
     EmbeddingConfigRequest, EmbeddingConfigResponse, EmbeddingConfigStateResponse,
 };
@@ -5,8 +8,9 @@ use wasm_bindgen_futures::spawn_local;
 use web_sys::{HtmlInputElement, HtmlSelectElement};
 use yew::prelude::*;
 
-use crate::api;
+use crate::api::ApiClient;
 use crate::components::ui::{Spinner, VectorBars};
+use crate::components::workbench::MainHead;
 use crate::icons;
 use crate::util::{format_time, host_label};
 
@@ -69,6 +73,7 @@ fn protocol_label(protocol: Option<&str>) -> &'static str {
 
 #[derive(Properties, PartialEq)]
 pub struct EmbeddingProps {
+    pub nav: Html,
     pub on_saved: Callback<()>,
 }
 
@@ -85,8 +90,10 @@ pub fn embedding_section(props: &EmbeddingProps) -> Html {
     let error = use_state(|| None::<String>);
     let note = use_state(|| None::<String>);
     let probe = use_state(|| None::<EmbeddingConfigResponse>);
+    let api = use_context::<ApiClient>().unwrap_or_default();
 
     {
+        let api = api.clone();
         let config_state = config_state.clone();
         let base_url = base_url.clone();
         let model = model.clone();
@@ -94,8 +101,9 @@ pub fn embedding_section(props: &EmbeddingProps) -> Html {
         let protocol = protocol.clone();
         let error = error.clone();
         use_effect_with((), move |_| {
+            let api = api.clone();
             spawn_local(async move {
-                match api::embedding_state().await {
+                match api.embedding_state().await {
                     Ok(data) => {
                         if data.status.configured && data.status.kind.as_deref() != Some("mock") {
                             if let Some(url) = data.status.base_url.clone() {
@@ -130,6 +138,7 @@ pub fn embedding_section(props: &EmbeddingProps) -> Html {
     }
 
     let on_submit = {
+        let api = api.clone();
         let base_url = base_url.clone();
         let api_key = api_key.clone();
         let model = model.clone();
@@ -183,11 +192,12 @@ pub fn embedding_section(props: &EmbeddingProps) -> Html {
             let error = error.clone();
             let note = note.clone();
             let probe = probe.clone();
+            let api = api.clone();
             let api_key_field = api_key.clone();
             let config_state = config_state.clone();
             let on_saved = on_saved.clone();
             spawn_local(async move {
-                match api::configure_embedding(&request).await {
+                match api.configure_embedding(&request).await {
                     Ok(response) => {
                         let latency = response.latency_ms;
                         let dimension = response.probe.dimension;
@@ -212,6 +222,7 @@ pub fn embedding_section(props: &EmbeddingProps) -> Html {
     };
 
     let on_mock = {
+        let api = api.clone();
         let submitting = submitting.clone();
         let error = error.clone();
         let note = note.clone();
@@ -229,10 +240,11 @@ pub fn embedding_section(props: &EmbeddingProps) -> Html {
             let error = error.clone();
             let note = note.clone();
             let probe = probe.clone();
+            let api = api.clone();
             let config_state = config_state.clone();
             let on_saved = on_saved.clone();
             spawn_local(async move {
-                match api::configure_mock().await {
+                match api.configure_mock().await {
                     Ok(status) => {
                         if let Some(mut state) = (*config_state).clone() {
                             state.status = status;
@@ -252,6 +264,7 @@ pub fn embedding_section(props: &EmbeddingProps) -> Html {
     };
 
     let on_clear = {
+        let api = api.clone();
         let error = error.clone();
         let note = note.clone();
         let probe = probe.clone();
@@ -261,10 +274,11 @@ pub fn embedding_section(props: &EmbeddingProps) -> Html {
             let error = error.clone();
             let note = note.clone();
             let probe = probe.clone();
+            let api = api.clone();
             let config_state = config_state.clone();
             let on_saved = on_saved.clone();
             spawn_local(async move {
-                match api::clear_embedding().await {
+                match api.clear_embedding().await {
                     Ok(status) => {
                         if let Some(mut state) = (*config_state).clone() {
                             state.status = status;
@@ -328,62 +342,10 @@ pub fn embedding_section(props: &EmbeddingProps) -> Html {
     };
 
     html! {
-        <section id="config" class="section config-section">
-            <div class="container">
-                <div class="config-shell reveal">
-                    <div class="config-copy">
-                        <p class="eyebrow">{ "Embedding API" }</p>
-                        <h2>{ "把模型，" }<span class="serif-accent">{ "接进来。" }</span></h2>
-                        <p class="config-lede">
-                            { "填写 OpenAI 兼容的 /embeddings 端点，或通义 MaaS 的原生 TextEmbedding 接口。密钥只保存在当前进程的内存里，不写盘、不写日志。" }
-                        </p>
-                        <ul class="feature-list">
-                            <li>{ icons::check() }{ "OpenAI 兼容 + DashScope 原生" }</li>
-                            <li>{ icons::check() }{ "自动探测真实向量维度" }</li>
-                            <li>{ icons::check() }{ "实时探针：看到第一条真实向量" }</li>
-                            <li>{ icons::check() }{ "无 API？可切换本地确定性演示嵌入" }</li>
-                        </ul>
-                        <div class={classes!("config-status", configured.then_some("is-ready"))}>
-                            <span class="config-status-icon">
-                                { if configured { icons::check() } else { icons::key() } }
-                            </span>
-                            <div>
-                                <p class="config-status-title">
-                                    { if configured { "嵌入服务已就绪" } else { "尚未接入嵌入服务" } }
-                                </p>
-                                <p class="config-status-text">
-                                    { match &status {
-                                        Some(status) if status.configured => {
-                                            format!(
-                                                "{} · {} 维 · {} · {}",
-                                                status.model.clone().unwrap_or_else(|| "—".to_string()),
-                                                status.dimension.unwrap_or(0),
-                                                status.base_url.as_deref().map(host_label).unwrap_or_else(|| "—".to_string()),
-                                                protocol_label(status.protocol.as_deref())
-                                            )
-                                        }
-                                        _ => "配置后即可运行入库流程与相似度检索。".to_string(),
-                                    } }
-                                </p>
-                                { if is_mock {
-                                    html! { <span class="chip chip-warning">{ "演示模式" }</span> }
-                                } else { Html::default() } }
-                            </div>
-                        </div>
-                        { if let Some(status) = &status {
-                            if status.configured {
-                                html! {
-                                    <div class="config-meta">
-                                        <span>{ format!("密钥：{}", status.api_key_masked.clone().unwrap_or_else(|| "未使用".to_string())) }</span>
-                                        <span>{ format!("配置于 {}", status.configured_at.as_deref().map(format_time).unwrap_or_else(|| "—".to_string())) }</span>
-                                    </div>
-                                }
-                            } else { Html::default() }
-                        } else { Html::default() } }
-                    </div>
-
-                    <div class="config-card">
-                        <form class="config-form" onsubmit={on_submit}>
+        <>
+            <aside class="wb-side">
+                { props.nav.clone() }
+                <form class="config-form" onsubmit={on_submit}>
                             <div class="preset-row">
                                 <span class="preset-label">{ "快速填入" }</span>
                                 { for PRESETS.iter().map(|(label, url, model_name, dims, wire_protocol)| {
@@ -524,33 +486,95 @@ pub fn embedding_section(props: &EmbeddingProps) -> Html {
                                 { "密钥仅保存在这个 Rust 进程的内存中；重启即清除。页面不会回显完整密钥。" }
                             </p>
                         </form>
-
-                        { if let Some(response) = &*probe {
-                            html! {
-                                <div class="probe-card">
-                                    <div class="probe-head">
-                                        <div>
-                                            <p class="probe-kicker">{ "实时探针" }</p>
-                                            <h3>{ "第一条真实向量" }</h3>
-                                        </div>
-                                        <span class="chip chip-success">
-                                            { format!("{} ms", response.latency_ms) }
-                                        </span>
-                                    </div>
-                                    <VectorBars
-                                        values={response.probe.sample.clone()}
-                                        dimension={response.probe.dimension}
-                                        norm={response.probe.norm}
-                                    />
-                                    <p class="probe-text">
-                                        { format!("探针文本：{}", response.probe.text) }
-                                    </p>
-                                </div>
-                            }
+            </aside>
+            <main class="wb-main">
+                <MainHead
+                    kicker={"Embedding API".to_string()}
+                    title={html! { <>{"把模型，"}<span class="serif-accent">{"接进来。"}</span></> }}
+                    subtitle={Some("填写 OpenAI 兼容的 /embeddings 端点，或通义 MaaS 的原生 TextEmbedding 接口。密钥只保存在当前进程的内存里，不写盘、不写日志。".to_string())}
+                />
+                <div class={classes!("config-status", configured.then_some("is-ready"))}>
+                    <span class="config-status-icon">
+                        { if configured { icons::check() } else { icons::key() } }
+                    </span>
+                    <div>
+                        <p class="config-status-title">
+                            { if configured { "嵌入服务已就绪" } else { "尚未接入嵌入服务" } }
+                        </p>
+                        <p class="config-status-text">
+                            { match &status {
+                                Some(status) if status.configured => {
+                                    format!(
+                                        "{} · {} 维 · {} · {}",
+                                        status.model.clone().unwrap_or_else(|| "—".to_string()),
+                                        status.dimension.unwrap_or(0),
+                                        status.base_url.as_deref().map(host_label).unwrap_or_else(|| "—".to_string()),
+                                        protocol_label(status.protocol.as_deref())
+                                    )
+                                }
+                                _ => "配置后即可运行入库流程与相似度检索。".to_string(),
+                            } }
+                        </p>
+                        { if is_mock {
+                            html! { <span class="chip chip-warning">{ "演示模式" }</span> }
                         } else { Html::default() } }
                     </div>
                 </div>
-            </div>
-        </section>
+                { if let Some(status) = &status {
+                    if status.configured {
+                        html! {
+                            <div class="config-meta">
+                                <span>{ format!("密钥：{}", status.api_key_masked.clone().unwrap_or_else(|| "未使用".to_string())) }</span>
+                                <span>{ format!("配置于 {}", status.configured_at.as_deref().map(format_time).unwrap_or_else(|| "—".to_string())) }</span>
+                            </div>
+                        }
+                    } else { Html::default() }
+                } else { Html::default() } }
+
+                <div class="panel">
+                    <ul class="feature-list">
+                        <li>{ icons::check() }{ "OpenAI 兼容 + DashScope 原生" }</li>
+                        <li>{ icons::check() }{ "自动探测真实向量维度" }</li>
+                        <li>{ icons::check() }{ "实时探针：看到第一条真实向量" }</li>
+                        <li>{ icons::check() }{ "无 API？可切换本地确定性演示嵌入" }</li>
+                    </ul>
+                </div>
+
+                { if let Some(response) = &*probe {
+                    html! {
+                        <div class="probe-card">
+                            <div class="probe-head">
+                                <div>
+                                    <p class="probe-kicker">{ "实时探针" }</p>
+                                    <h3>{ "第一条真实向量" }</h3>
+                                </div>
+                                <span class="chip chip-success">
+                                    { format!("{} ms", response.latency_ms) }
+                                </span>
+                            </div>
+                            <VectorBars
+                                values={response.probe.sample.clone()}
+                                dimension={response.probe.dimension}
+                                norm={response.probe.norm}
+                            />
+                            <p class="probe-text">
+                                { format!("探针文本：{}", response.probe.text) }
+                            </p>
+                        </div>
+                    }
+                } else {
+                    html! {
+                        <div class="console-empty wb-config-empty">
+                            <div class="console-orb" aria-hidden="true"><span></span></div>
+                            <p class="card-kicker">{ "Live probe" }</p>
+                            <h3>{ "等待第一次连接" }</h3>
+                            <p class="console-empty-text">
+                                { "保存并测试后，这里会展示后端返回的第一条真实向量、维度与延迟。" }
+                            </p>
+                        </div>
+                    }
+                } }
+            </main>
+        </>
     }
 }

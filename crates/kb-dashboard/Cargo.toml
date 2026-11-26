@@ -3,7 +3,7 @@ name = "kb-dashboard"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "Apple-style visual dashboard for the Qdrant_Rust knowledge base."
+description = "Reusable Axum dashboard API and launcher for the Qdrant_Rust knowledge base."
 
 [dependencies]
 anyhow = "1"

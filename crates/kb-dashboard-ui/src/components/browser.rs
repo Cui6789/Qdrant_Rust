@@ -1,3 +1,6 @@
+//! Search and browse section: keyword filtering, semantic search, document
+//! detail and deletion.
+
 use gloo_timers::callback::Interval;
 use kb_dashboard_types::{
     CollectionSummary, DocumentDetailResponse, DocumentListResponse, SearchResponse,
@@ -6,19 +9,23 @@ use wasm_bindgen_futures::spawn_local;
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
 
-use crate::api;
-use crate::components::ui::{EmptyState, SectionHeading, Spinner};
+use crate::api::ApiClient;
+use crate::components::ui::{EmptyState, Spinner};
+use crate::components::workbench::MainHead;
 use crate::icons;
 use crate::util::{format_int, format_time, truncate};
 
 #[derive(Properties, PartialEq)]
 pub struct BrowserProps {
+    pub nav: Html,
     pub collections: Vec<CollectionSummary>,
     pub active_collection: Option<String>,
     pub on_collection: Callback<String>,
     pub refresh_nonce: u32,
     pub embedding_configured: bool,
     pub on_changed: Callback<()>,
+    pub on_open_ingest: Callback<()>,
+    pub on_open_model: Callback<()>,
 }
 
 #[function_component(BrowserSection)]
@@ -38,6 +45,16 @@ pub fn browser_section(props: &BrowserProps) -> Html {
     let searching = use_state(|| false);
     let search_error = use_state(|| None::<String>);
     let search_results = use_state(|| None::<SearchResponse>);
+    let api = use_context::<ApiClient>().unwrap_or_default();
+
+    let on_open_ingest = {
+        let callback = props.on_open_ingest.clone();
+        Callback::from(move |_: web_sys::MouseEvent| callback.emit(()))
+    };
+    let on_open_model = {
+        let callback = props.on_open_model.clone();
+        Callback::from(move |_: web_sys::MouseEvent| callback.emit(()))
+    };
 
     {
         let on_collection = props.on_collection.clone();
@@ -89,11 +106,13 @@ pub fn browser_section(props: &BrowserProps) -> Html {
         let nonce = props.refresh_nonce;
         let live = *live;
         let tick = *manual_tick;
+        let api = api.clone();
         use_effect_with(
             (collection.clone(), filter.clone(), nonce, live, tick),
             move |_| {
                 let has_collection = collection.is_some();
                 let fetch = {
+                    let api = api.clone();
                     let docs = docs.clone();
                     let error = error.clone();
                     let loading = loading.clone();
@@ -112,9 +131,10 @@ pub fn browser_section(props: &BrowserProps) -> Html {
                             loading.set(true);
                         }
                         let query = filter.clone();
+                        let api = api.clone();
                         spawn_local(async move {
                             let query_opt = (!query.trim().is_empty()).then_some(query.as_str());
-                            match api::documents(&name, query_opt, 2_000).await {
+                            match api.documents(&name, query_opt, 2_000).await {
                                 Ok(data) => {
                                     docs.set(Some(data));
                                     error.set(None);
@@ -137,6 +157,7 @@ pub fn browser_section(props: &BrowserProps) -> Html {
     }
 
     let open_detail = {
+        let api = api.clone();
         let detail = detail.clone();
         let detail_loading = detail_loading.clone();
         let detail_error = detail_error.clone();
@@ -148,11 +169,12 @@ pub fn browser_section(props: &BrowserProps) -> Html {
             detail.set(None);
             detail_loading.set(true);
             detail_error.set(None);
+            let api = api.clone();
             let detail = detail.clone();
             let detail_loading = detail_loading.clone();
             let detail_error = detail_error.clone();
             spawn_local(async move {
-                match api::document_detail(&collection, &doc_id).await {
+                match api.document_detail(&collection, &doc_id).await {
                     Ok(data) => detail.set(Some(data)),
                     Err(failure) => detail_error.set(Some(failure.message)),
                 }
@@ -172,6 +194,7 @@ pub fn browser_section(props: &BrowserProps) -> Html {
     };
 
     let on_delete = {
+        let api = api.clone();
         let detail = detail.clone();
         let collection = props.active_collection.clone();
         let deleting = deleting.clone();
@@ -204,11 +227,12 @@ pub fn browser_section(props: &BrowserProps) -> Html {
             let detail = detail.clone();
             let deleting = deleting.clone();
             let detail_error = detail_error.clone();
+            let api = api.clone();
             let manual_tick = manual_tick.clone();
             let on_changed = on_changed.clone();
             let search_results = search_results.clone();
             spawn_local(async move {
-                match api::delete_document(&collection, &current.doc_id).await {
+                match api.delete_document(&collection, &current.doc_id).await {
                     Ok(_) => {
                         detail.set(None);
                         search_results.set(None);
@@ -261,6 +285,7 @@ pub fn browser_section(props: &BrowserProps) -> Html {
         })
     };
     let on_search = {
+        let api = api.clone();
         let search_query = search_query.clone();
         let searching = searching.clone();
         let search_error = search_error.clone();
@@ -288,11 +313,12 @@ pub fn browser_section(props: &BrowserProps) -> Html {
             searching.set(true);
             search_error.set(None);
             search_results.set(None);
+            let api = api.clone();
             let searching = searching.clone();
             let search_error = search_error.clone();
             let search_results = search_results.clone();
             spawn_local(async move {
-                match api::search(&collection, &query, 8).await {
+                match api.search(&collection, &query, 8).await {
                     Ok(response) => search_results.set(Some(response)),
                     Err(failure) => search_error.set(Some(failure.message)),
                 }
@@ -324,14 +350,9 @@ pub fn browser_section(props: &BrowserProps) -> Html {
     let live_on = *live;
 
     html! {
-        <section id="browser" class="section browser-section">
-            <div class="container">
-                <SectionHeading
-                    eyebrow={"Data Browser".to_string()}
-                    title={html! { <>{"数据库里的，"}<span class="serif-accent">{"每一篇"}</span>{"。"}</> }}
-                    subtitle={html! { "按文档聚合 Qdrant 中的真实 payload：块数、字符、标签、模型与写入时间一目了然。" }}
-                />
-
+        <>
+            <aside class="wb-side">
+                { props.nav.clone() }
                 <div class="browser-toolbar reveal">
                     <div class="browser-live">
                         <span class={classes!("live-pill", live_on.then_some("is-live"))}>
@@ -362,7 +383,8 @@ pub fn browser_section(props: &BrowserProps) -> Html {
                                 <strong>{ "还没有集合" }</strong>
                                 <p>{ "在上方入库流程中提交第一篇文档，集合会自动创建。" }</p>
                             </div>
-                            <a class="button button-small" href="#pipeline">{ "去入库" }</a>
+                            <button class="button button-small" type="button"
+                                onclick={on_open_ingest.clone()}>{ "去入库" }</button>
                         </div>
                     }
                 } else {
@@ -428,10 +450,18 @@ pub fn browser_section(props: &BrowserProps) -> Html {
                         <p class="inline-hint">
                             { icons::key() }
                             { "语义检索需要嵌入模型；当前仅能浏览与过滤文档。" }
-                            <a href="#config">{ "去接入" }</a>
+                            <button class="button button-small button-ghost" type="button"
+                                onclick={on_open_model.clone()}>{ "去接入" }</button>
                         </p>
                     }
                 } else { Html::default() } }
+            </aside>
+            <main class="wb-main">
+                <MainHead
+                    kicker={"Data Browser".to_string()}
+                    title={html! { <>{"数据库里的，"}<span class="serif-accent">{"每一篇"}</span>{"。"}</> }}
+                    subtitle={Some("按文档聚合 Qdrant 中的真实 payload：块数、字符、标签、模型与写入时间一目了然。".to_string())}
+                />
 
                 { if let Some(failure) = &*search_error {
                     html! { <p class="form-message is-error">{ failure.clone() }</p> }
@@ -701,7 +731,7 @@ pub fn browser_section(props: &BrowserProps) -> Html {
                         </div>
                     }
                 } else { Html::default() } }
-            </div>
-        </section>
+            </main>
+        </>
     }
 }

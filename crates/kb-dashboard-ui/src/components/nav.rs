@@ -1,3 +1,5 @@
+//! Slim top bar with the brand and live Qdrant/embedding status.
+
 use yew::prelude::*;
 
 use crate::icons;
@@ -9,6 +11,7 @@ pub struct NavProps {
     pub loaded: bool,
 }
 
+/// Slim top bar: brand, Qdrant state and embedding state.
 #[function_component(Nav)]
 pub fn nav(props: &NavProps) -> Html {
     let qdrant_class = if !props.loaded {
@@ -38,19 +41,13 @@ pub fn nav(props: &NavProps) -> Html {
     html! {
         <header class="nav">
             <div class="nav-inner">
-                <a class="brand" href="#top" aria-label="回到顶部">
+                <div class="brand" aria-label="Qdrant_Rust Studio 工作台">
                     { icons::logo() }
                     <span class="brand-text">
                         <span class="brand-name">{ "Qdrant_Rust" }</span>
-                        <span class="brand-sub">{ "Studio" }</span>
+                        <span class="brand-sub">{ "Studio · 工作台" }</span>
                     </span>
-                </a>
-                <nav class="nav-links" aria-label="页面导航">
-                    <a href="#overview">{ "概览" }</a>
-                    <a href="#pipeline">{ "入库流程" }</a>
-                    <a href="#config">{ "模型接入" }</a>
-                    <a href="#browser">{ "数据浏览器" }</a>
-                </nav>
+                </div>
                 <div class="nav-status">
                     <span class={qdrant_class} title="Qdrant gRPC 连接状态">
                         <i class="status-dot"></i>

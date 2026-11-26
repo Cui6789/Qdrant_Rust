@@ -4,8 +4,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use anyhow::Context;
 use chrono::{DateTime, Utc};
-use kb_core::config::IngestConfig;
+use kb_core::config::{AppConfig, IngestConfig};
 use kb_core::embedding::EmbeddingProvider;
 use kb_core::store::QdrantStore;
 use kb_dashboard_types::{EmbeddingDefaults, EmbeddingStatus, PipelineJob, PipelineResult};
@@ -37,6 +38,34 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Creates dashboard state from the shared application config.
+    ///
+    /// The Qdrant client is constructed here, but no connection is attempted;
+    /// the caller decides whether to probe it during startup.
+    pub fn from_config(config: &AppConfig) -> anyhow::Result<Self> {
+        let store = Arc::new(QdrantStore::new(&config.qdrant).context("创建 Qdrant 客户端失败")?);
+        Ok(Self {
+            store,
+            qdrant_url: config.qdrant.url.clone(),
+            qdrant_api_key_configured: !config.qdrant.api_key.trim().is_empty(),
+            ingest: config.ingest.clone(),
+            embedding: Arc::new(tokio::sync::RwLock::new(EmbeddingRuntime::default())),
+            defaults: EmbeddingDefaults {
+                base_url: config.embedding.api.base_url.clone(),
+                model: config.embedding.api.model.clone(),
+                dimensions: config.embedding.api.dimensions,
+            },
+            embedding_timeout_secs: config.embedding.api.timeout_secs,
+            embedding_max_retries: config.embedding.api.max_retries,
+            embedding_batch_size: config.embedding.batch_size,
+            embedding_max_concurrent_batches: config.embedding.max_concurrent_batches,
+            jobs: Arc::new(Mutex::new(JobStore::default())),
+            started_instant: Instant::now(),
+            started_at: Utc::now(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        })
+    }
+
     /// Cloneable snapshot of the currently configured embedding status.
     pub async fn embedding_status(&self) -> EmbeddingStatus {
         self.embedding.read().await.status.clone()

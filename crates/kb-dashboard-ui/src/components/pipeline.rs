@@ -1,3 +1,6 @@
+//! Ingest section: document form, live pipeline stages, event console and
+//! artifact previews.
+
 use gloo_timers::future::TimeoutFuture;
 use kb_dashboard_types::{
     CollectionSummary, JobStatus, PipelineChunkPreview, PipelineEvent, PipelineJob, PipelineRequest,
@@ -7,12 +10,11 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{HtmlInputElement, HtmlSelectElement, HtmlTextAreaElement};
 use yew::prelude::*;
 
-use crate::api;
-use crate::components::ui::{SectionHeading, Spinner, VectorBars};
+use crate::api::ApiClient;
+use crate::components::ui::{Spinner, VectorBars};
+use crate::components::workbench::MainHead;
 use crate::icons;
-use crate::util::{
-    format_clock, format_duration, format_int, infer_format, scroll_to, stem, truncate,
-};
+use crate::util::{format_clock, format_duration, format_int, infer_format, stem, truncate};
 
 const SAMPLE_DOCUMENT: &str = r#"# 向量工作台
 
@@ -34,11 +36,14 @@ Markdown 按标题切块，并保留 heading_path。相同内容使用确定性 
 
 #[derive(Properties, PartialEq)]
 pub struct PipelineProps {
+    pub nav: Html,
     pub collections: Vec<CollectionSummary>,
     pub active_collection: Option<String>,
     pub embedding_configured: bool,
     pub on_collection: Callback<String>,
     pub on_done: Callback<()>,
+    pub on_view_browser: Callback<()>,
+    pub on_open_model: Callback<()>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +107,7 @@ pub fn pipeline_section(props: &PipelineProps) -> Html {
     let job = use_state(|| None::<PipelineJob>);
     let error = use_state(|| None::<String>);
     let log_ref = use_node_ref();
+    let api = use_context::<ApiClient>().unwrap_or_default();
 
     {
         let log_ref = log_ref.clone();
@@ -144,6 +150,7 @@ pub fn pipeline_section(props: &PipelineProps) -> Html {
     }
 
     let on_submit = {
+        let api = api.clone();
         let collection = collection.clone();
         let text = text.clone();
         let doc_id = doc_id.clone();
@@ -199,15 +206,16 @@ pub fn pipeline_section(props: &PipelineProps) -> Html {
             let submitting = submitting.clone();
             let job = job.clone();
             let error = error.clone();
+            let api = api.clone();
             let on_collection = on_collection.clone();
             let on_done = on_done.clone();
             spawn_local(async move {
-                match api::start_pipeline(&request).await {
+                match api.start_pipeline(&request).await {
                     Ok(started) => {
                         let id = started.job_id;
                         let mut saw_finish = false;
                         for _ in 0..2400 {
-                            match api::pipeline_job(&id).await {
+                            match api.pipeline_job(&id).await {
                                 Ok(snapshot) => {
                                     let finished = snapshot.status.is_finished();
                                     let failed = snapshot.status == JobStatus::Failed;
@@ -375,7 +383,11 @@ pub fn pipeline_section(props: &PipelineProps) -> Html {
         && !collection.trim().is_empty()
         && !text.trim().is_empty();
 
-    let on_view_browser = { Callback::from(move |_| scroll_to("browser")) };
+    let on_view_browser = props.on_view_browser.clone();
+    let on_open_model = {
+        let callback = props.on_open_model.clone();
+        Callback::from(move |_: web_sys::MouseEvent| callback.emit(()))
+    };
     let on_reset = {
         let job = job.clone();
         let error = error.clone();
@@ -386,37 +398,10 @@ pub fn pipeline_section(props: &PipelineProps) -> Html {
     };
 
     html! {
-        <section id="pipeline" class="section pipeline-section">
-            <div class="container">
-                <SectionHeading
-                    eyebrow={"Ingest Pipeline".to_string()}
-                    title={html! { <>{"从一段文字，到一条"}<span class="serif-accent">{"向量"}</span>{"。"}</> }}
-                    subtitle={html! { "每一次解析、切块、嵌入与写入都会实时回传。看到的不是示意动画，而是真实后端进度。" }}
-                    centered={true}
-                />
-
-                <div class="stage-track reveal">
-                    <div class="stage-track-line" aria-hidden="true">
-                        <span class={classes!("track-pulse", any_running.then_some("is-active"))}></span>
-                    </div>
-                    { for stage_meta.iter().enumerate().map(|(index, (number, title, subtitle))| {
-                        let view = views.get(index).cloned().unwrap_or(StageView {
-                            state: StageState::Pending,
-                            detail: "等待提交".to_string(),
-                            duration_ms: None,
-                        });
-                        render_stage_card(
-                            number,
-                            title,
-                            subtitle,
-                            stage_icons[index].clone(),
-                            &view,
-                        )
-                    }) }
-                </div>
-
-                <div class="pipeline-grid">
-                    <form class="ingest-card reveal" onsubmit={on_submit}>
+        <>
+            <aside class="wb-side">
+                { props.nav.clone() }
+                <form class="ingest-card reveal" onsubmit={on_submit}>
                         <div class="ingest-head">
                             <div>
                                 <p class="card-kicker">{ "Ingest" }</p>
@@ -433,7 +418,8 @@ pub fn pipeline_section(props: &PipelineProps) -> Html {
                                         <strong>{ "先接入嵌入模型" }</strong>
                                         <p>{ "填写 API URL 与 Key，或启用本地演示嵌入。" }</p>
                                     </div>
-                                    <a class="button button-small" href="#config">{ "去接入" }</a>
+                                    <button class="button button-small" type="button"
+                                        onclick={on_open_model.clone()}>{ "去接入" }</button>
                                 </div>
                             }
                         } else { Html::default() } }
@@ -510,8 +496,8 @@ pub fn pipeline_section(props: &PipelineProps) -> Html {
                             <span class="field-label">{ "文档内容" }</span>
                             <textarea
                                 class="input textarea"
-                                rows="12"
-                                placeholder="粘贴一段文本，或从右侧载入示例…"
+                                rows="8"
+                                placeholder="粘贴一段文本，或点击下方载入示例…"
                                 value={(*text).clone()}
                                 oninput={on_text_input}
                                 spellcheck="false"
@@ -582,22 +568,46 @@ pub fn pipeline_section(props: &PipelineProps) -> Html {
                                 { "相同内容再次提交会走幂等对账，不会重复消耗嵌入调用。" }
                             </p>
                         </div>
-                    </form>
-
-                    <div class="console-card reveal">
-                        { render_console(
-                            &job,
-                            &error,
-                            props.embedding_configured,
-                            on_view_browser,
-                            on_reset,
-                            log_ref,
-                            *submitting,
-                        ) }
+                </form>
+            </aside>
+            <main class="wb-main">
+                <MainHead
+                    kicker={"Ingest pipeline".to_string()}
+                    title={html! { <>{"从一段文字，到一条"}<span class="serif-accent">{"向量"}</span>{"。"}</> }}
+                    subtitle={Some("每一次解析、切块、嵌入与写入都会实时回传，看到的不是示意动画，而是真实后端进度。".to_string())}
+                />
+                <div class="stage-track reveal">
+                    <div class="stage-track-line" aria-hidden="true">
+                        <span class={classes!("track-pulse", any_running.then_some("is-active"))}></span>
                     </div>
+                    { for stage_meta.iter().enumerate().map(|(index, (number, title, subtitle))| {
+                        let view = views.get(index).cloned().unwrap_or(StageView {
+                            state: StageState::Pending,
+                            detail: "等待提交".to_string(),
+                            duration_ms: None,
+                        });
+                        render_stage_card(
+                            number,
+                            title,
+                            subtitle,
+                            stage_icons[index].clone(),
+                            &view,
+                        )
+                    }) }
                 </div>
-            </div>
-        </section>
+                <div class="console-card reveal">
+                    { render_console(
+                        &job,
+                        &error,
+                        props.embedding_configured,
+                        on_view_browser,
+                        on_reset,
+                        log_ref,
+                        *submitting,
+                    ) }
+                </div>
+            </main>
+        </>
     }
 }
 
