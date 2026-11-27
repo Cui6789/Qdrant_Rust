@@ -1,11 +1,9 @@
 //! HTTP handlers for the visual dashboard API.
 //!
-//! The dashboard reads Qdrant directly (it never needs `kb-server`), reuses the
-//! `kb-core` ingestion/chunking/embedding pipeline, and keeps the embedding API
-//! key in process memory only.
+//! Operations that depend on the active model use the host's knowledge-base
+//! service snapshot. The dashboard never manages model settings.
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::rejection::{JsonRejection, QueryRejection};
@@ -13,20 +11,16 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use chrono::{SecondsFormat, Utc};
-use kb_core::config::ApiEmbeddingConfig;
-use kb_core::embedding::api::ApiEmbedding;
-use kb_core::embedding::mock::DeterministicEmbedding;
-use kb_core::embedding::EmbeddingProvider;
-use kb_core::models::{DocumentFormat, DocumentMetadata};
+use kb_core::error::KbError;
+use kb_core::models::{DocumentFormat, DocumentMetadata, SearchRequest as CoreSearchRequest};
 use kb_core::service::{validate_collection_name, IngestInput};
 use kb_dashboard_types::*;
 use qdrant_client::qdrant::r#match::MatchValue;
-use qdrant_client::qdrant::{Condition, Filter, ScoredPoint};
+use qdrant_client::qdrant::{Condition, Filter};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
-use crate::dashscope::DashScopeEmbedding;
 use crate::error::ApiError;
 use crate::pipeline::{self, PreparedPipeline};
 use crate::state::{AppState, DEFAULT_DOC_SCAN_LIMIT, MAX_DOC_SCAN_LIMIT};
@@ -38,8 +32,6 @@ type ApiResult<T> = Result<T, ApiError>;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Maximum chunks returned for one document detail request.
 const DOCUMENT_CHUNK_LIMIT: u32 = 5_000;
-/// Default dimension for the local deterministic demo embedder.
-const DEFAULT_MOCK_DIMENSION: usize = 512;
 
 /// Query parameters of `GET /api/collections/{name}/documents`.
 #[derive(Debug, Deserialize)]
@@ -59,7 +51,7 @@ pub struct DocumentQuery {
 /// `GET /api/health`.
 pub async fn health(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
     let (qdrant, _) = collections_and_status(&state).await;
-    let embedding = state.embedding_status().await;
+    let embedding = state.embedding_status();
     let status = if qdrant.ready { "ok" } else { "degraded" };
     let code = if qdrant.ready {
         StatusCode::OK
@@ -80,7 +72,7 @@ pub async fn health(State(state): State<AppState>) -> (StatusCode, Json<Value>) 
 /// `GET /api/overview`.
 pub async fn overview(State(state): State<AppState>) -> Json<OverviewResponse> {
     let (qdrant, collections) = collections_and_status(&state).await;
-    let embedding = state.embedding_status().await;
+    let embedding = state.embedding_status();
     let total_points = collections.iter().map(|item| item.points_count).sum();
     let max_dimension = collections
         .iter()
@@ -118,28 +110,13 @@ pub async fn create_collection(
     payload: Result<Json<CreateCollectionRequest>, JsonRejection>,
 ) -> ApiResult<(StatusCode, Json<CollectionSummary>)> {
     let Json(request) = payload.map_err(json_rejection)?;
-    validate_collection_name(&request.name)?;
-    let provider = state
-        .embedding_provider()
-        .await
-        .ok_or_else(not_configured)?;
-    let dimension = provider.dimension() as u64;
-    if state.store.collection_exists(&request.name).await? {
-        return Err(ApiError::conflict(
-            "COLLECTION_EXISTS",
-            format!("集合 {} 已存在", request.name),
-        ));
-    }
-    state
-        .store
-        .create_collection(&request.name, dimension)
-        .await?;
+    let collection = state.service().create_collection(&request.name).await?;
     Ok((
         StatusCode::CREATED,
         Json(CollectionSummary {
-            name: request.name,
-            points_count: 0,
-            vector_size: dimension,
+            name: collection.name,
+            points_count: collection.points_count,
+            vector_size: collection.vector_size,
         }),
     ))
 }
@@ -149,10 +126,7 @@ pub async fn delete_collection(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> ApiResult<Json<DeleteCollectionResponse>> {
-    if !state.store.collection_exists(&name).await? {
-        return Err(ApiError::not_found(format!("集合 {name} 不存在")));
-    }
-    state.store.delete_collection(&name).await?;
+    state.service().delete_collection(&name).await?;
     Ok(Json(DeleteCollectionResponse {
         name,
         deleted: true,
@@ -289,10 +263,10 @@ pub async fn delete_document(
     query: Result<Query<DocumentQuery>, QueryRejection>,
 ) -> ApiResult<Json<DeleteDocumentResponse>> {
     let Query(query) = query.map_err(query_rejection)?;
-    state.store.collection_info(&collection).await?;
-    let filter = doc_filter(&query.doc_id);
-    let deleted_points = state.store.count(&collection, Some(filter.clone())).await?;
-    state.store.delete_by_filter(&collection, filter).await?;
+    let deleted_points = state
+        .service()
+        .delete_document(&collection, &query.doc_id)
+        .await?;
     Ok(Json(DeleteDocumentResponse {
         doc_id: query.doc_id,
         deleted_points,
@@ -310,179 +284,40 @@ pub async fn search(
     if query.is_empty() {
         return Err(ApiError::validation("检索内容不能为空"));
     }
-    if !state.store.collection_exists(&collection).await? {
-        return Err(ApiError::not_found(format!("集合 {collection} 不存在")));
-    }
-    let provider = state
-        .embedding_provider()
-        .await
-        .ok_or_else(not_configured)?;
+    let service = state.service();
     let top_k = request.top_k.unwrap_or(5).clamp(1, 50);
     let started = Instant::now();
-    let vector = provider.embed_query(query).await?;
-    let points = state
-        .store
+    let hits = service
         .search(
             &collection,
-            vector,
-            top_k as u64,
-            request.score_threshold,
-            None,
+            CoreSearchRequest {
+                query: query.to_string(),
+                top_k,
+                score_threshold: request.score_threshold,
+                filter: None,
+            },
         )
         .await?;
-    let results = points.into_iter().map(search_hit).collect();
+    let results = hits
+        .into_iter()
+        .map(|hit| SearchHit {
+            score: hit.score,
+            rerank_score: hit.rerank_score,
+            doc_id: hit.doc_id,
+            chunk_index: hit.chunk_index,
+            text: hit.text,
+            title: hit.metadata.title,
+            source: hit.metadata.source,
+            tags: hit.metadata.tags,
+            heading_path: hit.metadata.heading_path,
+        })
+        .collect();
     Ok(Json(SearchResponse {
         query: query.to_string(),
-        embedding_model: provider.model_id().to_string(),
+        embedding_model: service.embedder().model_id().to_string(),
         results,
         took_ms: started.elapsed().as_millis() as u64,
     }))
-}
-
-/// `GET /api/embedding/config`.
-pub async fn get_embedding_config(
-    State(state): State<AppState>,
-) -> Json<EmbeddingConfigStateResponse> {
-    Json(EmbeddingConfigStateResponse {
-        status: state.embedding_status().await,
-        defaults: state.defaults.clone(),
-    })
-}
-
-/// `POST /api/embedding/config` — validate, probe, and activate an endpoint.
-pub async fn set_embedding_config(
-    State(state): State<AppState>,
-    payload: Result<Json<EmbeddingConfigRequest>, JsonRejection>,
-) -> ApiResult<Json<EmbeddingConfigResponse>> {
-    let Json(request) = payload.map_err(json_rejection)?;
-    let base_url = request.base_url.trim().trim_end_matches('/').to_string();
-    let model = request.model.trim().to_string();
-    if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
-        return Err(ApiError::validation(
-            "Base URL 必须以 http:// 或 https:// 开头",
-        ));
-    }
-    if model.is_empty() {
-        return Err(ApiError::validation("模型名称不能为空"));
-    }
-    let protocol = request
-        .protocol
-        .as_deref()
-        .unwrap_or("openai")
-        .trim()
-        .to_ascii_lowercase();
-    if !matches!(protocol.as_str(), "openai" | "dashscope") {
-        return Err(ApiError::validation("接口协议必须是 openai 或 dashscope"));
-    }
-    let config = ApiEmbeddingConfig {
-        base_url: base_url.clone(),
-        api_key: request.api_key.trim().to_string(),
-        model: model.clone(),
-        dimensions: request.dimensions.unwrap_or(0),
-        timeout_secs: state.embedding_timeout_secs,
-        max_retries: state.embedding_max_retries,
-    };
-    let started = Instant::now();
-    let provider: Arc<dyn EmbeddingProvider> = match protocol.as_str() {
-        "dashscope" => {
-            Arc::new(DashScopeEmbedding::new(&config, state.embedding_batch_size).await?)
-        }
-        _ => Arc::new(
-            ApiEmbedding::new(
-                &config,
-                state.embedding_batch_size,
-                state.embedding_max_concurrent_batches,
-            )
-            .await?,
-        ),
-    };
-    let probe_text = "Qdrant_Rust 可视化工作台 · embedding probe";
-    let vector = provider.embed_query(probe_text).await?;
-    if vector.is_empty() {
-        return Err(ApiError {
-            status: StatusCode::BAD_GATEWAY,
-            code: "EMBEDDING_ERROR",
-            message: "嵌入接口返回了空向量".to_string(),
-        });
-    }
-    let latency_ms = started.elapsed().as_millis() as u64;
-    let dimension = vector.len();
-    let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
-    let sample = vector.iter().take(16).copied().collect();
-    let status = EmbeddingStatus {
-        configured: true,
-        kind: Some("api".to_string()),
-        protocol: Some(protocol.clone()),
-        base_url: Some(base_url.clone()),
-        model: Some(model.clone()),
-        dimension: Some(dimension),
-        api_key_masked: mask_api_key(&config.api_key),
-        configured_at: Some(now_ms()),
-    };
-    {
-        let mut runtime = state.embedding.write().await;
-        runtime.provider = Some(provider);
-        runtime.status = status.clone();
-    }
-    tracing::info!(
-        protocol = %protocol,
-        base_url = %base_url,
-        model = %model,
-        dimension,
-        latency_ms,
-        "embedding endpoint configured"
-    );
-    Ok(Json(EmbeddingConfigResponse {
-        status,
-        latency_ms,
-        probe: VectorProbe {
-            text: probe_text.to_string(),
-            dimension,
-            sample,
-            norm,
-        },
-    }))
-}
-
-/// `POST /api/embedding/mock` — deterministic local embeddings for demos.
-pub async fn set_mock_embedding(
-    State(state): State<AppState>,
-    payload: Result<Json<MockEmbeddingRequest>, JsonRejection>,
-) -> ApiResult<Json<EmbeddingStatus>> {
-    let request = match payload {
-        Ok(Json(request)) => request,
-        Err(_) => MockEmbeddingRequest { dimension: None },
-    };
-    let dimension = request
-        .dimension
-        .unwrap_or(DEFAULT_MOCK_DIMENSION)
-        .clamp(8, 4096);
-    let provider = DeterministicEmbedding::new(dimension);
-    let status = EmbeddingStatus {
-        configured: true,
-        kind: Some("mock".to_string()),
-        protocol: Some("mock".to_string()),
-        base_url: Some("local://deterministic".to_string()),
-        model: Some("deterministic-mock".to_string()),
-        dimension: Some(dimension),
-        api_key_masked: None,
-        configured_at: Some(now_ms()),
-    };
-    {
-        let mut runtime = state.embedding.write().await;
-        runtime.provider =
-            Some(Arc::new(provider) as Arc<dyn kb_core::embedding::EmbeddingProvider>);
-        runtime.status = status.clone();
-    }
-    tracing::info!(dimension, "deterministic demo embedder configured");
-    Ok(Json(status))
-}
-
-/// `DELETE /api/embedding/config`.
-pub async fn clear_embedding_config(State(state): State<AppState>) -> Json<EmbeddingStatus> {
-    let mut runtime = state.embedding.write().await;
-    *runtime = crate::state::EmbeddingRuntime::default();
-    Json(runtime.status.clone())
 }
 
 /// `POST /api/pipeline/run`.
@@ -511,37 +346,32 @@ pub async fn run_pipeline(
         extra,
     };
     let doc_id = clean_optional(request.doc_id);
-    let provider = state
-        .embedding_provider()
-        .await
-        .ok_or_else(not_configured)?;
-    let dimension = provider.dimension() as u64;
+    let service = state.service();
+    let dimension = service.embedder().dimension() as u64;
 
     let create_if_missing = request.create_collection.unwrap_or(true);
-    if state.store.collection_exists(&request.collection).await? {
-        let info = state.store.collection_info(&request.collection).await?;
-        if info.vector_size != dimension {
-            return Err(ApiError::conflict(
-                "EMBEDDING_DIM_MISMATCH",
-                format!(
-                    "集合 {} 使用 {} 维向量，而当前嵌入模型输出 {} 维；请新建集合并重新写入",
-                    request.collection, info.vector_size, dimension
-                ),
-            ));
+    let info = match service.collection_info(&request.collection).await {
+        Err(KbError::CollectionNotFound(_)) if create_if_missing => {
+            match service.create_collection(&request.collection).await {
+                Err(KbError::CollectionExists(_)) => {
+                    service.collection_info(&request.collection).await?
+                }
+                result => result?,
+            }
         }
-    } else if create_if_missing {
-        state
-            .store
-            .create_collection(&request.collection, dimension)
-            .await?;
-    } else {
-        return Err(ApiError::not_found(format!(
-            "集合 {} 不存在",
-            request.collection
-        )));
+        result => result?,
+    };
+    if info.vector_size != dimension {
+        return Err(ApiError::conflict(
+            "EMBEDDING_DIM_MISMATCH",
+            format!(
+                "集合 {} 使用 {} 维向量，而当前嵌入模型输出 {} 维；请新建集合并重新写入",
+                request.collection, info.vector_size, dimension
+            ),
+        ));
     }
 
-    let points_before = state.store.count(&request.collection, None).await?;
+    let points_before = info.points_count;
     let job_id = Uuid::new_v4().to_string();
     let started = Instant::now();
     let started_at = now_ms();
@@ -576,7 +406,7 @@ pub async fn run_pipeline(
                 metadata,
             },
             points_before,
-            provider,
+            service,
             started,
         },
     );
@@ -725,30 +555,6 @@ fn document_matches(document: &DocumentSummary, needle: &str) -> bool {
             .any(|tag| tag.to_lowercase().contains(needle))
 }
 
-fn search_hit(point: ScoredPoint) -> SearchHit {
-    let payload: Map<String, Value> = point
-        .payload
-        .into_iter()
-        .map(|(key, value)| (key, Value::from(value)))
-        .collect();
-    SearchHit {
-        score: point.score,
-        doc_id: payload_str(&payload, "doc_id")
-            .unwrap_or_default()
-            .to_string(),
-        chunk_index: payload_u64(&payload, "chunk_index").unwrap_or(0),
-        text: payload_str(&payload, "text")
-            .unwrap_or_default()
-            .to_string(),
-        title: payload_str(&payload, "title").map(str::to_string),
-        source: payload_str(&payload, "source").map(str::to_string),
-        tags: payload_strings(&payload, "tags"),
-        heading_path: payload_str(&payload, "heading_path")
-            .unwrap_or_default()
-            .to_string(),
-    }
-}
-
 fn payload_str<'a>(payload: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     payload.get(key).and_then(Value::as_str)
 }
@@ -837,27 +643,6 @@ fn server_info(state: &AppState) -> ServerInfo {
         uptime_secs: state.started_instant.elapsed().as_secs(),
         started_at: state.started_at.to_rfc3339_opts(SecondsFormat::Secs, true),
         poll_hint_ms: 3000,
-    }
-}
-
-fn not_configured() -> ApiError {
-    ApiError::conflict(
-        "EMBEDDING_NOT_CONFIGURED",
-        "尚未配置嵌入模型，请先在「模型接入」中填写 API URL 与 Key",
-    )
-}
-
-fn mask_api_key(key: &str) -> Option<String> {
-    let key = key.trim();
-    if key.is_empty() {
-        return None;
-    }
-    let chars: Vec<char> = key.chars().collect();
-    if chars.len() <= 4 {
-        Some("••••".to_string())
-    } else {
-        let tail: String = chars[chars.len() - 4..].iter().collect();
-        Some(format!("••••{tail}"))
     }
 }
 

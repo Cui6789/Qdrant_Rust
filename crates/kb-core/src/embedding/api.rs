@@ -11,9 +11,6 @@ use crate::error::{KbError, Result};
 const BASE_RETRY_DELAY_MS: u64 = 250;
 /// Upper bound for the exponential backoff delay.
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(5);
-/// Maximum number of response-body characters kept in error messages.
-const MAX_ERROR_BODY_CHARS: usize = 500;
-
 /// Embedding provider backed by an OpenAI-compatible `/embeddings` endpoint.
 pub struct ApiEmbedding {
     client: reqwest::Client,
@@ -37,23 +34,12 @@ impl ApiEmbedding {
         batch_size: usize,
         max_concurrent_batches: usize,
     ) -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(config.timeout_secs))
-            .build()
-            .map_err(|error| KbError::Embedding(format!("failed to build HTTP client: {error}")))?;
-
-        let mut provider = Self {
-            client,
-            endpoint: format!("{}/embeddings", config.base_url.trim_end_matches('/')),
-            api_key: config.api_key.clone(),
-            model: config.model.clone(),
-            requested_dimensions: (config.dimensions > 0).then_some(config.dimensions),
-            dimension: config.dimensions,
-            max_retries: config.max_retries,
-            batch_size: batch_size.max(1),
-            max_concurrent_batches: max_concurrent_batches.max(1),
-        };
-
+        let mut provider = Self::with_known_dimension(
+            config,
+            batch_size,
+            max_concurrent_batches,
+            config.dimensions,
+        )?;
         if provider.dimension == 0 {
             let probe = ["dimension probe".to_string()];
             let vectors = provider.request_batch(&probe).await?;
@@ -67,8 +53,34 @@ impl ApiEmbedding {
             }
             provider.dimension = dimension;
         }
-
         Ok(provider)
+    }
+
+    /// Uses a dimension already resolved for this model. The configured
+    /// dimensions argument still controls the wire format.
+    pub fn with_known_dimension(
+        config: &ApiEmbeddingConfig,
+        batch_size: usize,
+        max_concurrent_batches: usize,
+        dimension: usize,
+    ) -> Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(config.timeout_secs))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| KbError::Embedding(format!("failed to build HTTP client: {error}")))?;
+
+        Ok(Self {
+            client,
+            endpoint: format!("{}/embeddings", config.base_url.trim_end_matches('/')),
+            api_key: config.api_key.clone(),
+            model: config.model.clone(),
+            requested_dimensions: (config.dimensions > 0).then_some(config.dimensions),
+            dimension,
+            max_retries: config.max_retries,
+            batch_size: batch_size.max(1),
+            max_concurrent_batches: max_concurrent_batches.max(1),
+        })
     }
 
     /// Embeds a single batch, retrying transient failures.
@@ -118,9 +130,10 @@ impl ApiEmbedding {
         let response = match request.send().await {
             Ok(response) => response,
             Err(error) => {
+                let retryable = error.is_timeout() || error.is_connect();
                 return Err(AttemptFailure {
-                    message: format!("embedding request failed: {error}"),
-                    retryable: error.is_timeout() || error.is_connect(),
+                    message: format!("embedding request failed: {}", error.without_url()),
+                    retryable,
                     retry_after: None,
                     status: None,
                 });
@@ -129,37 +142,21 @@ impl ApiEmbedding {
 
         let status = response.status();
         let retry_after = retry_after_delay(&response);
-        let raw_body = match response.text().await {
-            Ok(body) => body,
-            Err(error) => {
-                return Err(AttemptFailure {
-                    message: format!("failed to read embedding response: {error}"),
-                    retryable: false,
-                    retry_after: None,
-                    status: Some(status),
-                });
-            }
-        };
-
         if !status.is_success() {
             return Err(AttemptFailure {
-                message: format!(
-                    "embedding API returned {status}: {}",
-                    truncate_body(&raw_body)
-                ),
+                message: format!("embedding API returned {status}"),
                 retryable: status.as_u16() == 429 || status.is_server_error(),
                 retry_after,
                 status: Some(status),
             });
         }
 
-        let response: EmbeddingResponse =
-            serde_json::from_str(&raw_body).map_err(|error| AttemptFailure {
-                message: format!("invalid embedding response: {error}"),
-                retryable: false,
-                retry_after: None,
-                status: Some(status),
-            })?;
+        let response: EmbeddingResponse = response.json().await.map_err(|_| AttemptFailure {
+            message: "invalid embedding response".into(),
+            retryable: false,
+            retry_after: None,
+            status: Some(status),
+        })?;
 
         let mut data = response.data;
         data.sort_by_key(|item| item.index);
@@ -282,17 +279,6 @@ fn retry_after_delay(response: &reqwest::Response) -> Option<Duration> {
     Duration::try_from_secs_f64(value.trim().parse::<f64>().ok()?).ok()
 }
 
-/// Truncates an error response body for inclusion in error messages.
-fn truncate_body(body: &str) -> String {
-    let body = body.trim();
-    if body.chars().count() <= MAX_ERROR_BODY_CHARS {
-        return body.to_string();
-    }
-    let mut truncated: String = body.chars().take(MAX_ERROR_BODY_CHARS).collect();
-    truncated.push_str("...");
-    truncated
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -305,6 +291,7 @@ mod tests {
 
     fn config(server: &MockServer) -> ApiEmbeddingConfig {
         ApiEmbeddingConfig {
+            protocol: Default::default(),
             base_url: format!("{}/v1/", server.uri()),
             api_key: "sk-test".to_string(),
             model: "test-model".to_string(),

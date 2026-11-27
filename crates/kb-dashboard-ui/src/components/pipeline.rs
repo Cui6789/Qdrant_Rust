@@ -43,7 +43,6 @@ pub struct PipelineProps {
     pub on_collection: Callback<String>,
     pub on_done: Callback<()>,
     pub on_view_browser: Callback<()>,
-    pub on_open_model: Callback<()>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,7 +179,7 @@ pub fn pipeline_section(props: &PipelineProps) -> Html {
                 return;
             }
             if !embedding_configured {
-                error.set(Some("请先在「模型接入」中配置嵌入服务".to_string()));
+                error.set(Some("后端嵌入服务尚未就绪，请稍后重试".to_string()));
                 return;
             }
             let tag_list = tags
@@ -368,7 +367,7 @@ pub fn pipeline_section(props: &PipelineProps) -> Html {
     let stage_meta = [
         ("01", "输入", "文本 / Markdown / HTML / JSON"),
         ("02", "解析与切块", "标题感知 · 中文友好"),
-        ("03", "向量化", "OpenAI 兼容 /embeddings"),
+        ("03", "向量化", "当前共享后端嵌入服务"),
         ("04", "写入 Qdrant", "确定性 ID · 幂等对账"),
     ];
     let stage_icons = [
@@ -384,10 +383,6 @@ pub fn pipeline_section(props: &PipelineProps) -> Html {
         && !text.trim().is_empty();
 
     let on_view_browser = props.on_view_browser.clone();
-    let on_open_model = {
-        let callback = props.on_open_model.clone();
-        Callback::from(move |_: web_sys::MouseEvent| callback.emit(()))
-    };
     let on_reset = {
         let job = job.clone();
         let error = error.clone();
@@ -413,20 +408,18 @@ pub fn pipeline_section(props: &PipelineProps) -> Html {
                         { if !props.embedding_configured {
                             html! {
                                 <div class="notice is-warning compact">
-                                    <span class="notice-icon">{ icons::key() }</span>
+                                    <span class="notice-icon">{ icons::cpu() }</span>
                                     <div>
-                                        <strong>{ "先接入嵌入模型" }</strong>
-                                        <p>{ "填写 API URL 与 Key，或启用本地演示嵌入。" }</p>
+                                        <strong>{ "后端嵌入服务未就绪" }</strong>
+                                        <p>{ "状态来自后端服务；就绪后本页会自动启用入库。" }</p>
                                     </div>
-                                    <button class="button button-small" type="button"
-                                        onclick={on_open_model.clone()}>{ "去接入" }</button>
                                 </div>
                             }
                         } else { Html::default() } }
 
                         <label class="field">
                             <span class="field-label">{ "集合" }</span>
-                            <span class="field-hint">{ "不存在时会自动创建，维度取自当前嵌入模型" }</span>
+                            <span class="field-hint">{ "不存在时会自动创建，维度取当前共享嵌入服务" }</span>
                             <input
                                 class="input"
                                 type="text"
@@ -919,7 +912,7 @@ fn render_console(
                     { if embedding_configured {
                         "提交后，这里会实时打印解析、切块、嵌入与写入事件。"
                     } else {
-                        "先在左侧完成模型接入，提交后会在这里看到完整过程。"
+                        "后端嵌入服务就绪后，提交内容会在这里实时展开完整过程。"
                     } }
                 </p>
                 <div class="console-mini-steps">
@@ -1088,11 +1081,11 @@ fn render_result(
                     </span>
                 </div>
                 <div class="result-fact">
-                    <span class="result-label">{ "嵌入模型" }</span>
+                    <span class="result-label">{ "实际嵌入模型" }</span>
                     <span class="result-value mono">{ result.embedding_model.clone() }</span>
                 </div>
                 <div class="result-fact">
-                    <span class="result-label">{ "维度" }</span>
+                    <span class="result-label">{ "向量维度" }</span>
                     <span class="result-value">{ result.dimension.to_string() }</span>
                 </div>
                 <div class="result-fact">
@@ -1109,7 +1102,7 @@ fn render_result(
                     <p class="result-note">
                         { icons::check() }
                         { if result.skipped {
-                            "再次提交相同内容会命中幂等对账：不调用嵌入 API，也不重写向量。"
+                            "再次提交相同内容会命中幂等对账：不调用嵌入服务，也不重写向量。"
                         } else {
                             "文本未变，仅更新了标题、来源或标签等元数据。"
                         } }

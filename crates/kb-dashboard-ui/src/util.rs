@@ -95,16 +95,23 @@ pub fn scroll_to(id: &str) {
     }
 }
 
-/// Label for the current embedding provider.
-pub fn embedding_label(status: &kb_dashboard_types::EmbeddingStatus) -> String {
+/// Label for the current embedding provider kind.
+pub fn embedding_provider_label(status: &kb_dashboard_types::EmbeddingStatus) -> String {
     match status.kind.as_deref() {
-        Some("mock") => "本地演示嵌入".to_string(),
-        Some("api") => status
-            .model
-            .clone()
-            .unwrap_or_else(|| "API 嵌入".to_string()),
-        _ => "未配置".to_string(),
+        Some("api") => "远程 API".to_string(),
+        Some("mock") => "本地演示".to_string(),
+        Some(kind) if !kind.trim().is_empty() => kind.to_string(),
+        _ => "未标明".to_string(),
     }
+}
+
+/// Model label reported by the active embedding service.
+pub fn embedding_model_label(status: &kb_dashboard_types::EmbeddingStatus) -> String {
+    status
+        .model
+        .clone()
+        .filter(|model| !model.trim().is_empty())
+        .unwrap_or_else(|| "模型未标明".to_string())
 }
 
 /// Shows only the host portion of an endpoint for compact status labels.

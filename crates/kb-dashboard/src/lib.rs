@@ -1,24 +1,9 @@
 //! Reusable Axum API and application router for the Qdrant_Rust dashboard.
 //!
-//! The binary (`src/main.rs`) is only a launcher; this library owns the HTTP
-//! surface so another Rust service can mount it directly.
-//!
-//! # Example
-//!
-//! ```ignore
-//! use kb_core::config::AppConfig;
-//! use kb_dashboard::{build_app, resolve_ui_dir, AppState};
-//!
-//! let config = AppConfig::load(None)?;
-//! let state = AppState::from_config(&config)?;
-//! let app = build_app(state, resolve_ui_dir());
-//! // axum::serve(listener, app).await?;
-//! ```
-//!
-//! Use [`build_api`] to mount only `/api`, and [`build_app`] to serve the
-//! bundled Yew frontend as well.
+//! The host supplies a knowledge-base service snapshot to [`AppState::new`].
+//! Use [`build_api`] for the workbench API or [`build_app`] to serve the
+//! bundled Yew frontend with it.
 
-pub mod dashscope;
 pub mod error;
 pub mod handlers;
 pub mod pipeline;
@@ -34,25 +19,24 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde_json::json;
-use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::services::ServeDir;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
 pub use error::ApiError;
-pub use state::{AppState, EmbeddingRuntime, JobStore};
+pub use state::{AppState, JobStore};
 
 /// Default port of the dashboard (kept separate from kb-server's 8080).
 pub const DEFAULT_PORT: u16 = 8090;
-/// Default bind address: loopback only, because the API can hold an API key.
+/// Default bind address for the local workbench.
 pub const DEFAULT_HOST: &str = "127.0.0.1";
 /// Maximum JSON request body accepted by the dashboard.
 pub const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
-/// Upper bound for a synchronous dashboard request (search/embedding probe).
+/// Upper bound for a synchronous dashboard request.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Builds the `/api` router, including body limits, timeouts, tracing and CORS.
+/// Builds the same-origin `/api` router for the workbench.
 pub fn build_api(state: AppState) -> Router {
     Router::new()
         .route("/health", get(handlers::health))
@@ -71,15 +55,9 @@ pub fn build_api(state: AppState) -> Router {
             get(handlers::document_detail).delete(handlers::delete_document),
         )
         .route("/collections/{name}/search", post(handlers::search))
-        .route(
-            "/embedding/config",
-            get(handlers::get_embedding_config)
-                .post(handlers::set_embedding_config)
-                .delete(handlers::clear_embedding_config),
-        )
-        .route("/embedding/mock", post(handlers::set_mock_embedding))
         .route("/pipeline/run", post(handlers::run_pipeline))
         .route("/pipeline/jobs/{id}", get(handlers::get_pipeline_job))
+        .fallback(|| async { ApiError::not_found("接口不存在") })
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TimeoutLayer::with_status_code(
@@ -92,12 +70,6 @@ pub fn build_api(state: AppState) -> Router {
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
 }
 
 /// Builds the complete application: `/api` plus the built Yew frontend.
@@ -109,7 +81,7 @@ pub fn build_app(state: AppState, ui_dir: impl AsRef<Path>) -> Router {
     let index = ui_dir.join("index.html");
     let api = build_api(state);
     if index.exists() {
-        let static_files = ServeDir::new(ui_dir).fallback(ServeFile::new(&index));
+        let static_files = ServeDir::new(ui_dir);
         Router::new()
             .nest("/api", api)
             .fallback_service(static_files)
@@ -117,7 +89,6 @@ pub fn build_app(state: AppState, ui_dir: impl AsRef<Path>) -> Router {
         Router::new()
             .nest("/api", api)
             .route("/", get(missing_ui_page))
-            .fallback(missing_ui_page)
     }
 }
 

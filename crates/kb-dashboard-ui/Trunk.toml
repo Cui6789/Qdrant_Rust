@@ -10,3 +10,6 @@ ignore = ["dist"]
 addresses = ["127.0.0.1"]
 port = 8081
 open = false
+
+[[proxy]]
+backend = "http://127.0.0.1:8090/api/"

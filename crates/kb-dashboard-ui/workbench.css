@@ -123,6 +123,10 @@ body {
     box-shadow: 0 8px 22px rgba(11, 11, 15, 0.18);
 }
 
+.wb-cat-button:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+}
+
 .wb-cat-icon {
     width: 30px;
     height: 30px;
@@ -293,17 +297,6 @@ body {
     font-size: 19px;
 }
 
-.wb-side .config-form {
-    background: #ffffff;
-    border: 1px solid var(--line);
-    border-radius: 20px;
-    padding: 18px;
-}
-
-.wb-side .config-form .field:last-of-type {
-    margin-bottom: 8px;
-}
-
 .wb-side .browser-toolbar {
     margin-bottom: 0;
 }
@@ -428,29 +421,6 @@ body {
 
 .wb-main .doc-row {
     min-width: 680px;
-}
-
-.wb-main .panel .feature-list {
-    margin: 0;
-}
-
-.wb-main .config-status {
-    border-radius: 18px;
-}
-
-.wb-main .probe-card {
-    border-radius: 20px;
-}
-
-.wb-main .wb-config-empty {
-    min-height: 260px;
-    border-radius: 20px;
-    background: #ffffff;
-    border: 1px solid var(--line);
-}
-
-.wb-main .config-meta {
-    margin-top: -4px;
 }
 
 /* ----------------------------------------------------------------- narrow */

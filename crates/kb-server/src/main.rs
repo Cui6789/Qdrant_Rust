@@ -1,18 +1,20 @@
 //! Knowledge base HTTP server entry point.
 
+use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use kb_core::config::{AppConfig, ProviderKind};
+use axum::Router;
+use kb_core::config::AppConfig;
 use kb_core::models::EmbeddingInfo;
-use kb_core::service::KnowledgeBaseService;
 use kb_core::store::QdrantStore;
-use kb_server::api::build_router;
-use kb_server::build_embedder;
+use kb_server::api::build_managed_router;
+use kb_server::management::Management;
 use kb_server::state::AppState;
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -27,85 +29,123 @@ async fn main() -> Result<()> {
         host = %config.server.host,
         port = config.server.port,
         qdrant_url = %config.qdrant.url,
-        provider = provider_label(config.embedding.provider),
         auth_enabled = !config.server.api_key.is_empty(),
         max_body_mb = config.server.max_body_mb,
         request_timeout_secs = config.server.request_timeout_secs,
         "starting kb-server"
     );
 
-    // `chunk_size` is measured in Unicode characters while `max_length` is a
-    // model token limit; one CJK character is often close to one token, so a
-    // chunk larger than the window is silently truncated by the model.
-    if config.embedding.provider == ProviderKind::Local
-        && config.ingest.chunk_size > config.embedding.local.max_length
-    {
-        tracing::warn!(
-            chunk_size = config.ingest.chunk_size,
-            max_length = config.embedding.local.max_length,
-            "ingest.chunk_size counts Unicode characters but embedding.local.max_length counts model tokens \
-             (a rough characters-to-tokens approximation, not an exact conversion); longer chunks are silently \
-             truncated. Lower ingest.chunk_size (for example 400) for CJK models such as bge-small-zh-v1.5."
-        );
-    }
-
-    let store = QdrantStore::new(&config.qdrant).context("failed to build the Qdrant client")?;
+    let store =
+        Arc::new(QdrantStore::new(&config.qdrant).context("failed to build the Qdrant client")?);
     store
         .wait_ready(Duration::from_secs(config.qdrant.startup_retry_secs))
         .await
         .context("Qdrant is not ready")?;
 
-    let embedder = build_embedder(&config.embedding)
-        .await
-        .context("failed to initialize the embedding provider")?;
-    let dimension = embedder.dimension();
-    tracing::info!(
-        provider = provider_label(config.embedding.provider),
-        model = %embedder.model_id(),
-        dimension,
-        "embedding provider ready"
+    let management = Arc::new(
+        Management::new(config.clone(), store.clone())
+            .await
+            .context("failed to initialize knowledge base providers")?,
     );
-
-    let embedding = EmbeddingInfo {
-        provider: provider_label(config.embedding.provider).to_string(),
-        model: embedder.model_id().to_string(),
-        dimension,
+    let (service, provider) = management.snapshot();
+    let embedding = {
+        let embedder = service.embedder();
+        EmbeddingInfo {
+            provider: provider.as_str().into(),
+            model: embedder.model_id().into(),
+            dimension: embedder.dimension(),
+        }
     };
+    tracing::info!(provider = %embedding.provider, model = %embedding.model, dimension = embedding.dimension, "embedding provider ready");
     let api_key = (!config.server.api_key.is_empty()).then(|| config.server.api_key.clone());
     let max_body_bytes = config.server.max_body_mb.saturating_mul(1024 * 1024);
     let state = AppState {
-        service: Arc::new(KnowledgeBaseService::new(
-            Arc::new(store),
-            embedder,
-            config.ingest.clone(),
-        )),
+        service,
         api_key,
         max_body_bytes,
         request_timeout: Duration::from_secs(config.server.request_timeout_secs),
         embedding,
     };
-    let app = build_router(state);
+    let app = build_managed_router(state, management.clone());
 
-    let address = format!("{}:{}", config.server.host, config.server.port);
-    let listener = TcpListener::bind(&address)
+    let listener = TcpListener::bind((config.server.host.as_str(), config.server.port))
         .await
-        .with_context(|| format!("failed to bind {address}"))?;
-    tracing::info!(address = %address, "kb-server listening");
+        .with_context(|| {
+            format!(
+                "failed to bind {}:{}",
+                config.server.host, config.server.port
+            )
+        })?;
+    let workbench = open_workbench(management, store, config.qdrant.url).await?;
+    tracing::info!(address = %listener.local_addr()?, "kb-server listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("HTTP server failed")?;
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let workbench_shutdown = shutdown_rx.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        shutdown_tx.send_replace(true);
+    });
+    tokio::try_join!(
+        async {
+            serve(listener, app, shutdown_rx)
+                .await
+                .context("HTTP server failed")
+        },
+        async {
+            if let Some((listener, app)) = workbench {
+                serve(listener, app, workbench_shutdown)
+                    .await
+                    .context("workbench server failed")?;
+            }
+            Ok(())
+        },
+    )?;
     tracing::info!("kb-server stopped");
     Ok(())
 }
 
-/// Config-aware provider label used in logs and health output.
-fn provider_label(provider: ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::Local => "local",
-        ProviderKind::Api => "api",
+/// Enable the local, unauthenticated workbench only when explicitly requested.
+async fn open_workbench(
+    management: Arc<Management>,
+    store: Arc<QdrantStore>,
+    qdrant_url: String,
+) -> Result<Option<(TcpListener, Router)>> {
+    let Some(port) = env::var("DASHBOARD_PORT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let port = port
+        .trim()
+        .parse::<u16>()
+        .context("invalid DASHBOARD_PORT")?;
+    let host = env::var("DASHBOARD_HOST").unwrap_or_else(|_| kb_dashboard::DEFAULT_HOST.into());
+    let listener = TcpListener::bind((host.as_str(), port))
+        .await
+        .with_context(|| format!("failed to bind workbench to {host}:{port}"))?;
+    let address = listener.local_addr()?;
+    let ui_dir = kb_dashboard::resolve_ui_dir();
+    tracing::info!(%address, ui_dir = %ui_dir.display(), "workbench listening");
+    if !ui_dir.join("index.html").is_file() {
+        tracing::warn!(
+            "workbench bundle not found; run trunk build --release in crates/kb-dashboard-ui"
+        );
     }
+    let state = kb_dashboard::AppState::new(store, qdrant_url, move || management.snapshot());
+    Ok(Some((listener, kb_dashboard::build_app(state, ui_dir))))
+}
+
+async fn serve(
+    listener: TcpListener,
+    app: Router,
+    mut shutdown: watch::Receiver<bool>,
+) -> std::io::Result<()> {
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown.wait_for(|stopped| *stopped).await;
+        })
+        .await
 }
 
 /// Parses `--config <path>` / `--config=<path>`; `KB_CONFIG` is honored by

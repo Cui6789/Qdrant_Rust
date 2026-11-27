@@ -21,12 +21,16 @@ pub enum KbError {
     DimensionMismatch(String),
     #[error("embedding error: {0}")]
     Embedding(String),
+    #[error("rerank error: {0}")]
+    Rerank(String),
     #[error("qdrant error: {0}")]
     Qdrant(String),
     #[error("payload too large: {0}")]
     PayloadTooLarge(String),
     #[error("parse error: {0}")]
     Parse(String),
+    #[error("document parser error: {0}")]
+    ParserUnavailable(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("internal error: {0}")]

@@ -1,16 +1,16 @@
-# Keep the Docker build context small: these are local build artifacts, runtime
-# data, model caches and secrets that the image never needs.
+# Keep the Docker context to source, manifests and the server's embedded admin
+# assets. Dockerfile itself is always sent to the builder.
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+!crates/**
+!config/
+!config/config.example.toml
 
-target/
-data/
-.tools/
-.superpowers/
-.git/
-.env
-*.log
-
-# Model caches (fastembed/Hugging Face).
-.fastembed_cache/
-models/
-**/models--*/
-*.onnx
+# Local outputs, caches and generated dashboard assets are never build inputs.
+crates/**/target/
+crates/**/dist/
+crates/**/.fastembed_cache/
+crates/**/.trunk/
+crates/**/node_modules/

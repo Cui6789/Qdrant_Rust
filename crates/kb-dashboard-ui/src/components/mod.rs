@@ -6,7 +6,6 @@
 //! presentational primitives.
 
 pub mod browser;
-pub mod embedding;
 pub mod nav;
 pub mod overview;
 pub mod pipeline;
@@ -14,7 +13,6 @@ pub mod ui;
 pub mod workbench;
 
 pub use browser::BrowserSection;
-pub use embedding::EmbeddingSection;
 pub use nav::Nav;
 pub use overview::OverviewSection;
 pub use pipeline::PipelineSection;

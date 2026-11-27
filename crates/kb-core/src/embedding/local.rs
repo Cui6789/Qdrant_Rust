@@ -46,6 +46,15 @@ pub fn model_from_alias(alias: &str) -> Result<EmbeddingModel> {
         })
 }
 
+/// Lists each available alias and its native output size without loading weights.
+pub fn supported_model_dimensions() -> impl Iterator<Item = (&'static str, usize)> {
+    SUPPORTED_ALIASES.iter().filter_map(|(alias, model)| {
+        TextEmbedding::get_model_info(model)
+            .ok()
+            .map(|info| (*alias, info.dim))
+    })
+}
+
 /// Returns the default `(query, document)` prefixes for a model alias.
 ///
 /// Prefixes follow each model card; models without a prefix convention, and
@@ -114,6 +123,7 @@ impl LocalInit {
 pub struct LocalEmbedding {
     model_alias: String,
     dimension: usize,
+    native_dimension: usize,
     batch_size: usize,
     query_prefix: String,
     document_prefix: String,
@@ -124,16 +134,25 @@ pub struct LocalEmbedding {
 impl LocalEmbedding {
     /// Builds a provider for `config`.
     ///
-    /// The dimension is read from fastembed's model metadata without loading
-    /// the model; the ONNX model itself is loaded eagerly only when
-    /// `config.warmup` is set.
+    /// Validates the requested output size against fastembed's model metadata.
+    /// The ONNX model is loaded eagerly only when `config.warmup` is set.
     pub fn new(config: &LocalEmbeddingConfig, batch_size: usize) -> Result<Self> {
         let model = model_from_alias(&config.model)?;
-        let dimension = TextEmbedding::get_model_info(&model)
+        let native_dimension = TextEmbedding::get_model_info(&model)
             .map_err(|error| {
                 KbError::Embedding(format!("failed to look up embedding model info: {error}"))
             })?
             .dim;
+        let dimension = match config.dimensions {
+            0 => native_dimension,
+            dimensions if dimensions <= native_dimension => dimensions,
+            dimensions => {
+                return Err(KbError::Validation(format!(
+                    "local model {} outputs {native_dimension} dimensions; requested {dimensions}. Set dimensions to 0 or a value from 1 to {native_dimension}.",
+                    config.model
+                )))
+            }
+        };
         let (query_prefix, document_prefix) = resolve_prefixes(config, &config.model);
         let init = LocalInit {
             model,
@@ -150,6 +169,7 @@ impl LocalEmbedding {
         Ok(Self {
             model_alias: config.model.clone(),
             dimension,
+            native_dimension,
             batch_size: batch_size.max(1),
             query_prefix,
             document_prefix,
@@ -172,6 +192,8 @@ impl LocalEmbedding {
         let model = Arc::clone(&self.model);
         let init = self.init.clone();
         let batch_size = self.batch_size;
+        let dimension = self.dimension;
+        let native_dimension = self.native_dimension;
 
         tokio::task::spawn_blocking(move || -> Result<Vec<Vec<f32>>> {
             let mut guard = model.lock().map_err(|_| {
@@ -181,13 +203,52 @@ impl LocalEmbedding {
                 *guard = Some(init.load()?);
             }
             let model = guard.as_mut().expect("model loaded above");
-            model
+            let mut vectors = model
                 .embed(prefixed, Some(batch_size))
-                .map_err(|error| KbError::Embedding(format!("failed to embed texts: {error}")))
+                .map_err(|error| KbError::Embedding(format!("failed to embed texts: {error}")))?;
+            drop(guard);
+            for vector in &mut vectors {
+                if vector.len() != native_dimension {
+                    return Err(KbError::Embedding(format!(
+                        "local model returned {} dimensions; expected {native_dimension}",
+                        vector.len()
+                    )));
+                }
+                if dimension < native_dimension {
+                    // Nomic's Matryoshka recipe applies layer normalization before
+                    // slicing. Its scale factor cancels in the final L2 normalization.
+                    let center = init.model == EmbeddingModel::NomicEmbedTextV15;
+                    shorten_vector(vector, dimension, center)?;
+                }
+            }
+            Ok(vectors)
         })
         .await
         .map_err(|error| KbError::Embedding(format!("local embedding task failed: {error}")))?
     }
+}
+
+fn shorten_vector(vector: &mut Vec<f32>, dimension: usize, center: bool) -> Result<()> {
+    let mean = if center {
+        vector.iter().map(|&value| f64::from(value)).sum::<f64>() / vector.len() as f64
+    } else {
+        0.0
+    };
+    vector.truncate(dimension);
+    let norm = vector
+        .iter()
+        .map(|&value| (f64::from(value) - mean).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    if norm == 0.0 || !norm.is_finite() {
+        return Err(KbError::Embedding(
+            "the shortened embedding cannot be normalized; try a larger output dimension".into(),
+        ));
+    }
+    for value in vector {
+        *value = ((f64::from(*value) - mean) / norm) as f32;
+    }
+    Ok(())
 }
 
 #[async_trait::async_trait]
@@ -279,6 +340,33 @@ mod tests {
         ] {
             assert!(message.contains(alias), "missing {alias} in: {message}");
         }
+    }
+
+    #[test]
+    fn local_dimension_cannot_exceed_native_size() {
+        let mut config = LocalEmbeddingConfig {
+            warmup: false,
+            ..LocalEmbeddingConfig::default()
+        };
+        assert_eq!(LocalEmbedding::new(&config, 8).unwrap().dimension(), 512);
+        config.dimensions = 256;
+        assert_eq!(LocalEmbedding::new(&config, 8).unwrap().dimension(), 256);
+        config.dimensions = 513;
+        assert!(matches!(
+            LocalEmbedding::new(&config, 8),
+            Err(KbError::Validation(message)) if message.contains("513") && message.contains("512")
+        ));
+    }
+
+    #[test]
+    fn shortened_vectors_use_the_selected_dimensions_and_unit_norm() {
+        let mut vector = vec![3.0, 4.0, 14.0];
+        let mut centered = vector.clone();
+        shorten_vector(&mut vector, 2, false).unwrap();
+        assert_eq!(vector, vec![0.6, 0.8]);
+        shorten_vector(&mut centered, 2, true).unwrap();
+        assert_eq!(centered, vec![-0.8, -0.6]);
+        assert!(shorten_vector(&mut vec![0.0, 0.0, 1.0], 2, false).is_err());
     }
 
     #[test]

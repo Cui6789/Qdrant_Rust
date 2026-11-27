@@ -28,7 +28,7 @@ fn store(url: &str) -> QdrantStore {
     QdrantStore::new(&QdrantConfig {
         url: url.to_string(),
         api_key: String::new(),
-        timeout_secs: 10,
+        timeout_secs: 45,
         startup_retry_secs: 30,
     })
     .expect("store builds")
@@ -776,25 +776,40 @@ async fn missing_collection_maps_to_not_found() {
 async fn dimension_mismatch_maps_to_409_error() {
     let Some(url) = qdrant_url() else { return };
     let store = Arc::new(store(&url));
-    let (service, _embedder) = service(&store, 8);
+    let (original, _) = service(&store, 4);
+    let (changed, embedder) = service(&store, 8);
     let name = unique_name("dim");
     store.create_collection(&name, 4).await.expect("create");
 
-    let result = service
-        .ingest_document(
-            &name,
-            IngestInput {
-                doc_id: Some("doc-dim".to_string()),
-                text: "dimension mismatch test text".to_string(),
-                format: DocumentFormat::Text,
-                metadata: DocumentMetadata::default(),
-            },
-        )
-        .await;
-    match result {
-        Err(KbError::DimensionMismatch(_)) => {}
-        other => panic!("expected dimension mismatch, got {other:?}"),
-    }
+    let input = IngestInput {
+        doc_id: Some("doc-dim".to_string()),
+        text: "dimension mismatch test text".to_string(),
+        format: DocumentFormat::Text,
+        metadata: DocumentMetadata::default(),
+    };
+    original
+        .ingest_document(&name, input.clone())
+        .await
+        .unwrap();
+    assert!(matches!(
+        changed.ingest_document(&name, input).await,
+        Err(KbError::DimensionMismatch(_))
+    ));
+    assert!(matches!(
+        changed
+            .search(
+                &name,
+                SearchRequest {
+                    query: "dimension mismatch".into(),
+                    top_k: 1,
+                    score_threshold: None,
+                    filter: None,
+                },
+            )
+            .await,
+        Err(KbError::DimensionMismatch(_))
+    ));
+    assert_eq!(embedder.call_count(), 0);
 
     store
         .delete_collection(&name)

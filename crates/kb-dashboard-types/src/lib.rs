@@ -30,30 +30,8 @@ pub struct QdrantStatus {
 pub struct EmbeddingStatus {
     pub configured: bool,
     pub kind: Option<String>,
-    /// Wire protocol of the API endpoint: `openai`, `dashscope`, or `mock`.
-    #[serde(default)]
-    pub protocol: Option<String>,
-    pub base_url: Option<String>,
     pub model: Option<String>,
     pub dimension: Option<usize>,
-    pub api_key_masked: Option<String>,
-    pub configured_at: Option<String>,
-}
-
-impl EmbeddingStatus {
-    /// The "nothing configured yet" state.
-    pub fn empty() -> Self {
-        Self {
-            configured: false,
-            kind: None,
-            protocol: None,
-            base_url: None,
-            model: None,
-            dimension: None,
-            api_key_masked: None,
-            configured_at: None,
-        }
-    }
 }
 
 /// Server metadata shown in the dashboard footer/status cards.
@@ -75,58 +53,6 @@ pub struct OverviewResponse {
     pub scanned_at: String,
     pub total_points: u64,
     pub max_dimension: u64,
-}
-
-/// Defaults used to prefill the embedding configuration form.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EmbeddingDefaults {
-    pub base_url: String,
-    pub model: String,
-    pub dimensions: usize,
-}
-
-/// Response of `GET /api/embedding/config`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EmbeddingConfigStateResponse {
-    pub status: EmbeddingStatus,
-    pub defaults: EmbeddingDefaults,
-}
-
-/// Body of `POST /api/embedding/config`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EmbeddingConfigRequest {
-    pub base_url: String,
-    pub api_key: String,
-    pub model: String,
-    #[serde(default)]
-    pub dimensions: Option<usize>,
-    /// `openai` (default) or `dashscope` (native TextEmbedding API).
-    #[serde(default)]
-    pub protocol: Option<String>,
-}
-
-/// A real vector produced while testing the configured embedding endpoint.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct VectorProbe {
-    pub text: String,
-    pub dimension: usize,
-    pub sample: Vec<f32>,
-    pub norm: f32,
-}
-
-/// Response of `POST /api/embedding/config`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EmbeddingConfigResponse {
-    pub status: EmbeddingStatus,
-    pub latency_ms: u64,
-    pub probe: VectorProbe,
-}
-
-/// Body of `POST /api/embedding/mock`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MockEmbeddingRequest {
-    #[serde(default)]
-    pub dimension: Option<usize>,
 }
 
 /// Document-level summary aggregated from Qdrant point payloads.
@@ -200,6 +126,8 @@ pub struct SearchRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchHit {
     pub score: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerank_score: Option<f32>,
     pub doc_id: String,
     pub chunk_index: u64,
     pub text: String,

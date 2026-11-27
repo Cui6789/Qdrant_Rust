@@ -1,7 +1,8 @@
 # Starts Qdrant (if needed), builds the Yew/WASM frontend when missing, then
-# launches the kb-dashboard server. Intended for local development only.
+# launches kb-server with the workbench listener. For local development only.
 param(
-    [int]$Port = 8090
+    [ValidateRange(1, 65535)][int]$Port = 8090,
+    [string]$Config
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,6 +59,10 @@ or download a release from https://github.com/trunk-rs/trunk/releases
     }
 }
 
-# 3. Run the dashboard.
-Write-Host "Starting kb-dashboard on http://127.0.0.1:$Port"
-& cargo run -p kb-dashboard -- --port $Port
+# 3. Run both HTTP listeners in the same process.
+$env:DASHBOARD_PORT = "$Port"
+$env:DASHBOARD_HOST = "127.0.0.1"
+$serverArgs = @()
+if ($Config) { $serverArgs += @("--config", $Config) }
+Write-Host "Starting kb-server with the workbench on http://127.0.0.1:$Port"
+& cargo run -p kb-server -- @serverArgs

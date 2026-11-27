@@ -5,6 +5,10 @@ api_key = ""                  # 非空则要求 Authorization: Bearer <key>
 max_body_mb = 32
 request_timeout_secs = 300
 
+[admin]
+access_key = ""                # 为空时关闭管理 API
+settings_path = "./data/settings/runtime.json" # 保存 /admin/ 的覆盖项；保护该文件的读取权限
+
 [qdrant]
 url = "http://localhost:6334" # gRPC 端口（REST 6333 不用于 CRUD）
 api_key = ""
@@ -12,12 +16,14 @@ timeout_secs = 30
 startup_retry_secs = 30       # 启动时等待 Qdrant 就绪
 
 [embedding]
-provider = "local"            # local | api
+provider = "local"            # local | api | mock（仅演示）
 batch_size = 32
 max_concurrent_batches = 4
+mock_dimensions = 512
 
 [embedding.local]
 model = "bge-small-zh-v1.5"
+dimensions = 0                # 0 = 模型原始维度；可缩短到 1–原始维度
 cache_dir = "./data/models"
 show_download_progress = true
 max_length = 512
@@ -26,6 +32,7 @@ query_prefix = ""             # 留空使用模型默认前缀
 document_prefix = ""
 
 [embedding.api]
+protocol = "openai"            # openai | dashscope
 base_url = "https://api.openai.com/v1"
 api_key = ""
 model = "text-embedding-3-small"
@@ -43,3 +50,27 @@ chunk_size = 800              # 字符数
 chunk_overlap = 120
 min_chunk_size = 30
 upsert_batch_size = 64
+
+[rerank]
+provider = "disabled"          # disabled | local | api
+candidate_limit = 30           # 启用后至少召回 top_k 个候选
+
+[rerank.local]
+model = "bge-reranker-v2-m3"
+cache_dir = "./data/models"
+
+[rerank.api]
+endpoint = "https://api.siliconflow.com/v1/rerank"
+model = "Qwen/Qwen3-Reranker-8B"
+api_key = ""
+timeout_secs = 60
+
+[parsing]
+provider = "native"            # native | mineru_local | mineru_cloud
+
+[parsing.mineru]
+local_url = "http://127.0.0.1:8000/file_parse" # 旧版，也可用 4.x http://127.0.0.1:8003/v1/file_parse
+cloud_url = "https://mineru.net/api/v4"
+model_version = "vlm"
+api_key = ""
+timeout_secs = 600

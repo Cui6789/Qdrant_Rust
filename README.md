@@ -4,33 +4,40 @@
 
 ## 功能特性
 
-- **两种 Embedding 后端**：进程内 `fastembed`（ONNX，默认，开箱即用）或任意 OpenAI 兼容的 `/embeddings` 端点（OpenAI、通义兼容模式、SiliconFlow、Ollama、vLLM 等）。
-- **完整文档管道**：支持 `text`、`markdown`、`html`、`json` 四种格式；Markdown/HTML 按标题感知切块并保留 `heading_path`。
+- **Embedding 后端**：进程内 `fastembed`（ONNX，默认）、OpenAI 兼容 API、DashScope 原生 API，以及用于演示的确定性 Mock。
+- **文档解析与上传**：原生解析文本、Markdown、HTML 和 JSON。通过本地或云端 MinerU 解析 PDF 等文档，再按标题分块并保留 `heading_path`。
 - **中文友好**：按 Unicode 字符数切块，默认 `bge-small-zh-v1.5`（512 维），内置模型推荐的查询/文档前缀。
 - **幂等注入与自愈对账**：基于 `content_hash` 与确定性 point id；重复注入跳过 embedding，失败重试可自动补齐/清理残缺数据。
 - **元数据与过滤**：`source`、`title`、`tags`、`extra` 元数据；检索可按 `source`、`doc_ids`、`tags_any` 过滤。
 - **稳健的 HTTP 层**：Bearer 鉴权（可选）、请求体大小限制、统一超时、稳定的错误码信封。
-- **生产可用部署**：多阶段 Dockerfile、Docker Compose（Qdrant + kb-server），数据与模型缓存持久化。
+- **两阶段检索**：Qdrant 向量召回后可使用本地 BGE 或兼容 API 重排，保留两个阶段的分数。
+- **向量库管理**：在 `/admin/` 查看集合和文档、浏览切块、检索、上传、删除，并统一管理嵌入、重排、解析和供应商密钥。
+- **Docker Compose**：同时启动 Qdrant、知识库 API、管理端和可视化工作台，持久化 Qdrant 数据、模型缓存及后台配置。
 - **Windows 开发友好**：提供一键启动 Qdrant 的 PowerShell 脚本，无需 Docker 即可开发。
-- **Rust 可视化工作台**：`kb-dashboard`（Axum）+ `kb-dashboard-ui`（Yew/WASM），实时浏览向量库、运行时接入 OpenAI 兼容 / DashScope 原生嵌入模型，并可视化「输入 → 切块 → 嵌入 → 写入」全过程。
+- **Rust 可视化工作台**：`kb-dashboard`（Axum）+ `kb-dashboard-ui`（Yew/WASM），实时浏览向量库，共用后台的模型，展示「输入 → 切块 → 嵌入 → 写入」全过程。
 
 ## 架构
 
 ```mermaid
 flowchart LR
     Client["Agent / curl / SDK"] -->|"HTTP :8080"| Server["kb-server<br/>axum 路由 · Bearer 鉴权<br/>体积限制 · 超时 · 错误映射"]
+    Admin["管理后台 /admin/"] -->|"HTTP :8080"| Server
+    Workbench["可视化工作台"] -->|"HTTP :8090"| Server
     Server --> Service["KnowledgeBaseService<br/>解析 → 切块 → 标识 → 对账 → 清理"]
     Service --> Embedder{"Embedding Provider"}
     Embedder -->|"provider = local"| Local["fastembed / ONNX<br/>bge-small-zh-v1.5 等"]
-    Embedder -->|"provider = api"| API["OpenAI 兼容 /embeddings"]
+    Embedder -->|"provider = api"| API["OpenAI 兼容 / DashScope 原生"]
+    Embedder -->|"provider = mock"| Mock["确定性演示"]
     Service -->|"gRPC :6334"| Qdrant[("Qdrant<br/>collection（Cosine）")]
+    Service -->|"解析上传文件"| MinerU["MinerU 本地或云端"]
+    Service -->|"重排候选块"| Reranker["本地 ONNX 或 Rerank API"]
     Server -. "GET /health" .-> Qdrant
 ```
 
-- `kb-core`：配置、领域模型、Embedding trait、两种 provider、解析/切块、Qdrant 访问层、业务服务。
+- `kb-core`：配置、领域模型、Embedding trait 及实现、解析/切块、Qdrant 访问层、业务服务。
   直接作为 Rust 库操作 RAG 数据库（入库、检索、滚动、删除）的参考脚本见
   [crates/kb-core/README.md](crates/kb-core/README.md)。
-- `kb-server`：薄 HTTP 层（axum），负责鉴权、请求限制、错误映射和路由；依赖方向只有 `kb-server -> kb-core`。
+- `kb-server`：托管 REST API、后台管理页及工作台，一处加载和切换服务使用的模型。
 - Qdrant 通过 **gRPC（6334）** 访问；REST/Web UI 端口 6333 不用于本服务的 CRUD。
 
 ## 目录结构
@@ -122,30 +129,25 @@ Qdrant 未就绪时服务会在 `qdrant.startup_retry_secs`（默认 30 秒）�
 ### 方式 B：Docker Compose
 
 ```powershell
-# 可选：复制环境变量示例并按需修改（模型、API key、HF 镜像等）
-Copy-Item .env.example .env
+# 首次创建配置，已有 .env 时保留现有值。
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
+# 在 .env 中设置随机的 KB_ADMIN__ACCESS_KEY，按需设置 KB_SERVER__API_KEY。
 
-docker compose up --build
-curl.exe -s http://localhost:8080/health
+docker compose up -d --build
+curl.exe -fsS http://127.0.0.1:8080/health
 ```
 
-- `qdrant` 使用镜像 `qdrant/qdrant:v1.20.2`，数据写入 `./data/qdrant`。
-- `kb-server` 构建自本目录的 `Dockerfile`，模型缓存写入 `./data/models`。
+- `qdrant` 使用镜像 `qdrant/qdrant:v1.20.2`，数据写入 Docker 卷 `qdrant-storage`，避免 Windows 目录挂载影响写入。如果旧环境在 `./data/qdrant` 有实际数据，先从旧实例导出 Qdrant 快照，再导入新实例。
+- 知识库 API 使用 `http://127.0.0.1:8080`，后台使用 `http://127.0.0.1:8080/admin/`，可视化工作台使用 `http://127.0.0.1:8090`。
+- 从旧 Compose 配置升级时，先停止并移除旧的 `kb-dashboard` 容器（不删除卷），释放 8090；现在同一个 `kb-server` 容器监听两个端口。
 - 首次构建需要网络下载 Rust 依赖与 ONNX Runtime；首次启动会下载本地模型。
-- 停止服务：`docker compose down`（两个 `./data` 目录会保留，重启后数据仍在）。
-- 查看日志：`docker compose logs -f kb-server`。
-
-> **安全警告：不要在没有鉴权的情况下把 Qdrant 暴露到网络。** 默认 compose 只把
-> Dashboard/REST 端口绑定到 `127.0.0.1:6333`，并且**不发布** gRPC 端口 6334
-> （`kb-server` 通过 Compose 内部网络访问 `http://qdrant:6334`）。Qdrant 本身默认
-> 无鉴权；如果确需远程访问，必须为它配置 API key、TLS 或前置一个鉴权代理，
-> 并且不要用 `0.0.0.0` 直接发布端口。
+- `docker compose down` 停止服务并保留数据。运行 `docker compose logs -f kb-server` 查看启动过程。
+- Qdrant 的 REST 6333 和 gRPC 6334 默认只绑定本机。容器内使用 `http://qdrant:6334`。
 
 ## 可视化工作台
 
-项目内置一个 Apple 风格的可视化工作台（Axum + Yew/WASM）：实时查看 Qdrant 中的文档，
-在页面里填写嵌入模型的 Base URL 与 API Key，并观察「输入 → 解析切块 → 嵌入 → 写入」
-的完整过程。它直接连接 Qdrant（gRPC 6334），不要求 `kb-server` 同时运行。
+工作台（Axum + Yew/WASM）用于实时浏览 Qdrant 文档、检索和观察「输入 → 解析切块 → 嵌入 → 写入」。
+它只展示生效的模型和向量维度；选用和配置模型请前往 `/admin/` 的「设置」。
 
 ```powershell
 # 首次：安装 WASM 目标与 Trunk
@@ -157,8 +159,9 @@ cd crates\kb-dashboard-ui
 trunk build --release
 cd ..\..
 
-# 启动（默认 http://127.0.0.1:8090）
-cargo run -p kb-dashboard
+# 启动 kb-server，并在 http://127.0.0.1:8090 开启工作台
+$env:DASHBOARD_PORT = "8090"
+cargo run -p kb-server
 ```
 
 或使用一键脚本：
@@ -167,12 +170,40 @@ cargo run -p kb-dashboard
 powershell -ExecutionPolicy Bypass -File .\scripts\start-dashboard.ps1
 ```
 
-- 支持 **OpenAI 兼容**（`{base_url}/embeddings`）与 **DashScope 原生**
-  （`{base_url}/services/embeddings/text-embedding/text-embedding`）两种协议。
-- 页面内置通义 MaaS、OpenAI、SiliconFlow、Ollama 等预设；API Key 仅驻留进程内存，
-  不写盘、不写日志。
-- 工作台无登录鉴权且会请求用户填写的 Base URL，默认只绑定 `127.0.0.1`，不要直接暴露到公网。
+- 工作台没有登录鉴权，默认只绑定 `127.0.0.1`，不要直接暴露到公网。
 - 详细说明、API 参考与安全注意事项见 [docs/dashboard.md](docs/dashboard.md)。
+
+## 向量库后台管理
+
+在 `http://127.0.0.1:8080/admin/` 输入 `KB_ADMIN__ACCESS_KEY`。可以创建及删除集合，以文档 ID 查找和删除文档，逐页查看文档与切块，提交文本、上传文件并验证检索结果。
+
+后台设置保存成功后，工作台和 REST API 的新请求会使用同一套配置；已提交的入库任务继续使用提交时的模型。`admin.settings_path` 保存管理员编辑过的字段，服务重启后在 TOML 和环境变量之上应用这些值。API 只返回密钥是否已设置。密钥原文写入服务端配置文件，请限制对该路径的读取权限。`KB_SERVER__API_KEY` 用于 `/v1`，管理密钥用于 `/admin/api`。
+
+### 嵌入模型
+
+进入「设置 → 嵌入」，选择本地模型、API 服务或演示 Mock。API 模式支持 OpenAI 兼容和 DashScope 原生协议，包含六个常用服务预设。可在同一处验证当前模型的真实返回、维度和耗时，也可以恢复服务器启动时的嵌入配置；恢复只影响嵌入，不改动重排或解析设置。
+
+更换嵌入模型后，旧文档不会自动重新向量化。**即使新旧模型维度相同，也请新建集合并重新入库**，以免混用不同向量空间。
+
+### 检索重排
+
+在「设置 → 重排」选择关闭重排、本地模型或 API 服务。首次启用未缓存的本地模型时需要下载并加载权重。API 方式填写完整的 `/rerank` 端点、模型名和所需密钥。点击「保存并应用重排」更新当前方式；「测试当前重排」通过固定问题和两条示例片段验证已经保存的配置。
+
+Qdrant 根据查询向量、过滤条件和 `score_threshold` 召回候选，重排器从这些候选中重新选出 `top_k`。响应中的 `score` 是向量分数，`rerank_score` 是重排分数。配置为 `disabled` 时使用向量排序。也可通过 `KB_RERANK__PROVIDER=local` 启用本地模型。
+
+集合里的文档可通过 `GET /v1/collections/{name}/documents?limit=25` 分页查看。片段使用 `GET /v1/collections/{name}/documents/chunks?doc_id=...`。响应包含 `items`，还有下一页时会返回 `next_cursor`，将其作为下一次请求的 `cursor`。
+
+### MinerU 文件解析
+
+在「设置 → 解析」选择原生解析、自部署的本地 MinerU 或 MinerU 云端 API。运行 `docker compose --profile mineru up -d --build` 可启动本地解析服务；在 Compose 同网络内连接 `http://mineru:8003/v1/file_parse`。本地模型在 MinerU 服务自行选择；管理页只填写其完整接口地址，也支持旧版 `/file_parse`。
+
+云端模式填写 API 根地址（如 `https://mineru.net/api/v4`）、模型和 MinerU 访问令牌。「测试当前解析」用固定 Markdown、PDF 或 HTML 样例验证当前配置，不写入 Qdrant；云端测试会上传相应样例。
+
+上传时可省略 `parser` 以采用后台默认行为，或按文件指定 `native`、`mineru_local` 或 `mineru_cloud`。PDF、图片和常见 Office 格式按配置使用 MinerU，具体格式由所选后端和模型决定。文本、Markdown、HTML 和 JSON 仍由原生解析器处理。解析输出作为 Markdown 接入已有的切块、向量化和幂等写入。
+
+- [MinerU 本地服务文档](https://opendatalab.github.io/MinerU/usage/file_parse/)
+- [MinerU 云端 API 文档](https://mineru.net/apiManage/docs)
+- [SiliconFlow Rerank 请求格式](https://docs.siliconflow.com/en/api-reference/rerank/create-rerank)
 
 ## 配置说明
 
@@ -180,7 +211,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start-dashboard.ps1
 
 1. 内置默认值；
 2. `config/config.toml`（存在则读取；路径相对于进程工作目录）；
-3. `KB_` 前缀环境变量，嵌套层级用 `__` 分隔。
+3. `KB_` 前缀环境变量，嵌套层级用 `__` 分隔；
+4. 通过 `/admin/` 保存的字段覆盖上述启动配置。
 
 配置文件路径可用 `KB_CONFIG` 环境变量或命令行 `--config <path>` / `--config=<path>` 覆盖；显式指定的文件必须存在。
 
@@ -197,17 +229,20 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start-dashboard.ps1
 | `qdrant.api_key` | `""` | `KB_QDRANT__API_KEY` | Qdrant Cloud 等场景的 API key |
 | `qdrant.timeout_secs` | `30` | `KB_QDRANT__TIMEOUT_SECS` | Qdrant 请求超时 |
 | `qdrant.startup_retry_secs` | `30` | `KB_QDRANT__STARTUP_RETRY_SECS` | 启动时等待 Qdrant 就绪的时长 |
-| `embedding.provider` | `local` | `KB_EMBEDDING__PROVIDER` | `local` 或 `api` |
+| `embedding.provider` | `local` | `KB_EMBEDDING__PROVIDER` | `local`、`api` 或 `mock` |
 | `embedding.batch_size` | `32` | `KB_EMBEDDING__BATCH_SIZE` | 每批 embedding 的文本数 |
 | `embedding.max_concurrent_batches` | `4` | `KB_EMBEDDING__MAX_CONCURRENT_BATCHES` | API embedding 并发批次数 |
+| `embedding.mock_dimensions` | `512` | `KB_EMBEDDING__MOCK_DIMENSIONS` | Mock 输出维度（1–4096），仅用于演示 |
 | `embedding.local.model` | `bge-small-zh-v1.5` | `KB_EMBEDDING__LOCAL__MODEL` | 本地模型别名（见下表） |
+| `embedding.local.dimensions` | `0` | `KB_EMBEDDING__LOCAL__DIMENSIONS` | `0` 使用原始维度；也可指定 1 到原始维度的整数 |
 | `embedding.local.cache_dir` | `./data/models` | `KB_EMBEDDING__LOCAL__CACHE_DIR` | 模型缓存目录 |
 | `embedding.local.show_download_progress` | `true` | `KB_EMBEDDING__LOCAL__SHOW_DOWNLOAD_PROGRESS` | 是否显示下载进度 |
 | `embedding.local.max_length` | `512` | `KB_EMBEDDING__LOCAL__MAX_LENGTH` | ONNX 模型最大 token 长度 |
 | `embedding.local.warmup` | `true` | `KB_EMBEDDING__LOCAL__WARMUP` | 启动时加载模型；`false` 则首次请求时懒加载 |
 | `embedding.local.query_prefix` | `""` | `KB_EMBEDDING__LOCAL__QUERY_PREFIX` | 留空使用模型默认查询前缀 |
 | `embedding.local.document_prefix` | `""` | `KB_EMBEDDING__LOCAL__DOCUMENT_PREFIX` | 留空使用模型默认文档前缀 |
-| `embedding.api.base_url` | `https://api.openai.com/v1` | `KB_EMBEDDING__API__BASE_URL` | 兼容端点根地址（服务会追加 `/embeddings`） |
+| `embedding.api.protocol` | `openai` | `KB_EMBEDDING__API__PROTOCOL` | `openai` 或 `dashscope` |
+| `embedding.api.base_url` | `https://api.openai.com/v1` | `KB_EMBEDDING__API__BASE_URL` | 所选接口协议的根地址 |
 | `embedding.api.api_key` | `""` | `KB_EMBEDDING__API__API_KEY` | 为空时不发送 Authorization |
 | `embedding.api.model` | `text-embedding-3-small` | `KB_EMBEDDING__API__MODEL` | 模型名 |
 | `embedding.api.dimensions` | `0` | `KB_EMBEDDING__API__DIMENSIONS` | `0` 表示启动时用探针请求自动获取维度 |
@@ -273,7 +308,7 @@ cache_dir = "./data/models"
 warmup = true
 ```
 
-### OpenAI 兼容 API（`provider = "api"`）
+### OpenAI 兼容 API（`provider = "api"`，`protocol = "openai"`）
 
 请求格式固定为：
 
@@ -310,16 +345,34 @@ dimensions = 1024
 
 > 运行在 Docker 中访问宿主机上的 Ollama/vLLM 时，`localhost` 指向容器自身。Docker Desktop 可用 `http://host.docker.internal:11434/v1`；Linux 需为服务添加 `extra_hosts: ["host.docker.internal:host-gateway"]`。
 
-### 更换模型必须重建集合
+### DashScope 原生 API（`provider = "api"`，`protocol = "dashscope"`）
 
-集合的向量维度在创建时固定（Cosine 距离，维度 = 创建时的 provider 维度）。更换 embedding 模型时：
+填写原生 API 根地址（例如以 `/api/v1` 结尾）、模型名称和密钥。后台请求 `{base_url}/services/embeddings/text-embedding/text-embedding`，并分别为查询和文档传入对应的 `text_type`。在管理后台可通过预设填写这些字段。
 
-- **不同维度**：写入/检索会触发 Qdrant 维度错误，服务返回 `409 EMBEDDING_DIM_MISMATCH`。
-- **相同维度但不同模型**：服务无法自动检测（向量空间不同），检索结果会静默变差。
+### 管理 API
+
+以下接口使用同一个管理员访问密钥，通过 `Authorization: Bearer <key>` 鉴权：
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET / PATCH | `/admin/api/settings` | 查看生效设置、保存变更字段 |
+| POST | `/admin/api/settings/embedding/probe` | 使用当前模型测试，返回模型、维度、耗时、样本和范数 |
+| DELETE | `/admin/api/settings/embedding` | 清除嵌入覆盖项，恢复到 TOML 和环境变量定义的启动配置 |
+| POST | `/admin/api/settings/rerank/probe` | 使用固定问题和示例片段测试当前重排 |
+| POST | `/admin/api/settings/parsing/probe` | 使用固定样例测试当前解析，不入库 |
+
+### 更换模型或维度需要重新入库
+
+集合的向量维度在创建时固定（Cosine 距离，维度 = 创建时的 provider 维度）。
+
+在后台「设置 → 嵌入 → 本地模型」可修改输出维度。例如将原本 512 维的模型设为 256，入库和检索都会使用缩短并归一化的向量。缩短向量可能影响检索效果；调整输出维度后，请新建集合并重新入库。
+
+- **不同维度**：向旧集合写入或检索时，服务返回 `409 EMBEDDING_DIM_MISMATCH`。
+- **相同维度但不同模型**：旧向量和新查询不属于同一向量空间，检索可能返回不相关的结果。
 
 正确流程：
 
-1. 切换配置并重启服务（确认 `/health` 中的 `embedding.model` / `dimension` 为新值）；
+1. 在管理后台切换模型或维度（确认 `/health` 中的 `embedding.model` / `dimension` 为新值）；
 2. 用新名称创建集合：`POST /v1/collections {"name":"docs_v2"}`；
 3. 按原文档重新注入（建议保留原始文档，脚本可从 `source` 重建）；
 4. 客户端切到新集合，确认无误后删除旧集合。
@@ -502,6 +555,7 @@ Multipart 字段：
 | `source` | 否 | 元数据来源 |
 | `title` | 否 | 元数据标题 |
 | `tags` | 否 | 逗号分隔；也可重复该字段 |
+| `parser` | 否 | `native`、`mineru_local` 或 `mineru_cloud`；省略时由文件和服务配置决定 |
 | `format` | 否 | 显式指定；否则按扩展名推断（`.md/.markdown`→markdown，`.html/.htm`→html，`.json`→json，其余→text） |
 | `encoding` | 否 | `utf-8`（默认）/ `utf8` / `gbk` / `gb18030`；不自动探测 |
 
@@ -525,7 +579,15 @@ curl.exe -s -X POST http://localhost:8080/v1/collections/docs/documents/upload `
   -F "encoding=gbk"
 ```
 
-响应与文本注入相同（`IngestResult`）。文件超过 `server.max_body_mb` 返回 `413 PAYLOAD_TOO_LARGE`；编码标签不支持或字节非法返回 `400 INVALID_ENCODING`。
+`format` 与 `encoding` 由原生解析器使用。响应与文本注入相同（`IngestResult`）。请求超过 `server.max_body_mb` 返回 `413 PAYLOAD_TOO_LARGE`，编码标签或字节非法时返回 `400 INVALID_ENCODING`。上传路由为解析额外预留 `parsing.mineru.timeout_secs`。
+
+通过本地 MinerU 上传 PDF（配置 Bearer 时以实际值替换 `$key`）：
+
+```powershell
+curl.exe -fsS http://127.0.0.1:8080/v1/collections/docs/documents/upload `
+  -H "Authorization: Bearer $key" -F "file=@handbook.pdf" `
+  -F "parser=mineru_local" -F "doc_id=handbook"
+```
 
 ### 8. 检索
 
@@ -615,6 +677,8 @@ curl.exe -s -X DELETE -G http://localhost:8080/v1/collections/docs/documents `
 | 415 | `UNSUPPORTED_FORMAT` | `format` 不是 `text`/`markdown`/`html`/`json` |
 | 500 | `INTERNAL` | 配置、IO 或其它内部错误 |
 | 502 | `EMBEDDING_ERROR` | 本地/API embedding 失败（含重试后仍失败） |
+| 502 | `RERANK_ERROR` | 候选重排失败 |
+| 502 | `PARSER_ERROR` | MinerU 上游服务或解析任务失败 |
 | 502 | `QDRANT_ERROR` | Qdrant 调用失败 |
 
 ## 数据模型
@@ -663,8 +727,8 @@ curl.exe -s -X DELETE -G http://localhost:8080/v1/collections/docs/documents `
 - point id 是确定性 UUID v5：`{collection}:{doc_id}:{content_hash}:{chunk_index}`（固定命名空间）。
 - **每次注入都会对账**（即使文本未变）：
   1. 按 `doc_id + content_hash` 统计实际 point 数；若等于本次块数，再取出 id 集合与本次期望集合逐一比较；
-  2. 数量与 id 集合都一致时：先逐块比较存储的 `text` 与 `heading_path` 与本次切块结果（id 只包含内容哈希和块序号，切块参数变化时 id 集合可能不变但文本不同）；文本一致后再比较 `source`/`title`/`tags`/`extra`。全部相同 → `skipped=true`；仅有元数据变化 → 用 `set_payload` 原地更新，返回 `metadata_updated=true`，不调用 embedding；
-  3. 数量、id 集合或块文本不一致（上次中途失败、历史脏点、切块参数变化）→ 重新 embedding 并按确定性 id upsert；
+  2. 数量与 id 集合都一致时，逐块比较存储的 `text`、`heading_path` 和 `embedding_model`。匹配后再比较 `source`/`title`/`tags`/`extra`。全部相同 → `skipped=true`；仅有元数据变化 → 用 `set_payload` 原地更新，返回 `metadata_updated=true`，不调用 embedding；
+  3. 数量、id 集合、块内容或模型名不一致 → 重新 embedding 并按确定性 id upsert；
   4. 写入成功后清理：删除 `doc_id == X AND must_not has_id(本次所有 id)` 的 point，清除旧内容哈希残留、同哈希超出的尾块和历史脏数据。
 - 写入顺序为「**先新后清**」：中途失败时旧数据仍在，客户端重试即可收敛到完整状态。
 - 删除文档：先 count 再按 `doc_id` 删除，返回实际删除数；重复删除返回 0。
@@ -829,7 +893,7 @@ cargo build --no-default-features -p kb-server
 ```powershell
 # 前提：Qdrant 已在 6334 端口运行（scripts/start-qdrant.ps1 或 docker compose up qdrant）
 $env:KB_TEST_QDRANT_URL = "http://127.0.0.1:6334"
-cargo test --workspace -- --nocapture
+cargo test --locked --workspace -- --test-threads=1
 ```
 
 被 `#[ignore]` 标记的本地真实模型测试（首次会从 Hugging Face 下载 `bge-small-zh-v1.5`）：
@@ -873,7 +937,7 @@ cargo test -p kb-core embeds_chinese_text_with_bge_small_zh -- --ignored --nocap
 - **6333**：Qdrant 的 REST API 与 Web Dashboard（`http://localhost:6333/dashboard`）。
 - **6334**：Qdrant 的 gRPC 接口，本服务使用它。
 - `KB_QDRANT__URL` 必须指向 gRPC 端口（默认 `http://localhost:6334`）。误配成 6333 会在启动/健康检查时报 Qdrant 连接错误。
-- Docker Compose 只把 Dashboard/REST 发布到 `127.0.0.1:6333`（便于本机查看数据），gRPC 6334 不发布到宿主机；`kb-server` 通过 Compose 网络访问 `http://qdrant:6334`。
+- Docker Compose 把 REST 和 gRPC 分别发布到本机的 `127.0.0.1:6333` 和 `127.0.0.1:6334`。容器内使用 `http://qdrant:6334`。
 
 ### 本地模型下载失败 / 很慢
 
@@ -892,7 +956,7 @@ cargo test -p kb-core embeds_chinese_text_with_bge_small_zh -- --ignored --nocap
 
 ### `EMBEDDING_DIM_MISMATCH`（409）
 
-集合维度由创建时的 embedding 模型决定。切换模型后向旧集合写入/检索会报维度不匹配。按「更换模型必须重建集合」流程创建新集合并重新注入；同维度的模型切换不会报错但检索会变差，同样需要重建。
+集合维度在创建时固定。切换模型或输出维度后，请按「更换模型或维度需要重新入库」的步骤创建新集合并重新导入文档。
 
 ### GBK 文件上传乱码 / `INVALID_ENCODING`
 
@@ -930,13 +994,13 @@ Qdrant 的数据默认写入 `.tools\qdrant`，重启 Qdrant 或 kb-server 都�
 ### 已知限制
 
 - **单实例写协调**：条带锁只在进程内有效；多副本并发写同一文档无保证。v1 要求单写实例。
-- **同步注入**：大文档注入会占用请求直到完成，受 `server.request_timeout_secs` 限制；暂无异步任务/进度查询。
+- **同步注入**：API 请求等待入库完成。文件上传增加独立的 MinerU 解析预算，可通过 `parsing.mineru.timeout_secs` 调整。
 - **整篇重写**：文档内容变化会重新 embedding 全部块，不做增量块级 diff。
-- **无 hybrid / rerank**：仅稠密向量相似度检索；没有稀疏向量、混合检索、重排序、MMR。
-- **解析格式有限**：仅 text/markdown/html/json；不支持 PDF、DOCX、XLSX、PPTX、图片 OCR。
-- **模型迁移需手动**：同维度更换模型无法自动检测；没有集合级 embedding 配置与自动重建。
+- **候选来自稠密向量**：重排作用于 Qdrant 已召回的候选。
+- **文档格式取决于解析后端**：PDF、Office 文档和图片的支持范围由 MinerU 服务及模型决定。
+- **模型迁移需手动**：没有集合级 embedding 配置与自动重建；新旧模型即使维度相同也应分别使用不同集合。
 - **编码不自动探测**：上传必须显式声明 gbk/gb18030，否则按 UTF-8 处理。
-- **单一鉴权**：只有一个全局 Bearer token，无多租户/按集合权限。
+- **服务级鉴权**：REST API 和管理 API 使用各自的全局 Bearer 密钥。
 - **检索上限**：`top_k` 最大 50；集合列表一次性返回全部集合。
 - **`extra` 不可过滤**：v1 只支持 `source`/`doc_ids`/`tags_any`。
 - **版本固定**：面向 Qdrant 1.20.x 与 `qdrant-client` 1.20.0；跨大版本升级需重新验证。
@@ -944,9 +1008,9 @@ Qdrant 的数据默认写入 `.tools\qdrant`，重启 Qdrant 或 kb-server 都�
 ### Roadmap
 
 - 异步注入任务（提交任务 + 查询进度/结果），支持超大文档与批量导入。
-- Hybrid search（稀疏 + 稠密）与 rerank（交叉编码器或外部 rerank API）。
+- Hybrid search（稀疏 + 稠密）。
 - 增量块级更新与内容去重。
-- 更多解析器：PDF、DOCX、XLSX、PPTX、网页抓取与 OCR。
+- 从网页 URL 抓取内容并入库。
 - 多实例写入协调（分布式锁/单写路由）与集合级配置。
 - 更细粒度鉴权、配额、审计日志与 Prometheus 指标。
-- 自动 embedding 模型/维度迁移辅助工具，以及更完整的 Web 管理界面（多租户、审计、批量任务）；可视化工作台已提供基础版，见 `docs/dashboard.md`。
+- 自动 embedding 模型和维度迁移工具。管理端可进一步支持多租户、审计和批量任务。

@@ -1,5 +1,6 @@
 /target
 /data
+/.codegraph
 /.tools
 /.worktrees
 /.superpowers
@@ -7,5 +8,10 @@
 .env
 *.log
 .fastembed_cache
+models/
+**/models--*/
+*.onnx
+*.safetensors
+*.gguf
 /crates/kb-dashboard-ui/target
 /crates/kb-dashboard-ui/dist

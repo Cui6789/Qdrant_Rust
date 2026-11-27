@@ -33,9 +33,8 @@ impl std::fmt::Display for ApiError {
 
 /// Base URL of the dashboard API, including its `/api` suffix.
 ///
-/// The default client uses the current origin. During `trunk serve` on port
-/// 8081 it targets the dashboard binary on port 8090, matching the repository's
-/// development setup.
+/// The default client uses the current origin, including during `trunk serve`
+/// where Trunk proxies `/api` to the workbench listener.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiClient {
     base_url: String,
@@ -44,7 +43,7 @@ pub struct ApiClient {
 impl Default for ApiClient {
     fn default() -> Self {
         Self {
-            base_url: default_base(),
+            base_url: "/api".to_string(),
         }
     }
 }
@@ -103,35 +102,6 @@ impl ApiClient {
     /// `GET /api/overview`.
     pub async fn overview(&self) -> Result<OverviewResponse, ApiError> {
         self.get("/overview").await
-    }
-
-    /// `GET /api/embedding/config`.
-    pub async fn embedding_state(&self) -> Result<EmbeddingConfigStateResponse, ApiError> {
-        self.get("/embedding/config").await
-    }
-
-    /// `POST /api/embedding/config`.
-    pub async fn configure_embedding(
-        &self,
-        request: &EmbeddingConfigRequest,
-    ) -> Result<EmbeddingConfigResponse, ApiError> {
-        self.post("/embedding/config", request).await
-    }
-
-    /// `POST /api/embedding/mock`.
-    pub async fn configure_mock(&self) -> Result<EmbeddingStatus, ApiError> {
-        self.post(
-            "/embedding/mock",
-            &MockEmbeddingRequest {
-                dimension: Some(512),
-            },
-        )
-        .await
-    }
-
-    /// `DELETE /api/embedding/config`.
-    pub async fn clear_embedding(&self) -> Result<EmbeddingStatus, ApiError> {
-        self.delete("/embedding/config").await
     }
 
     /// `GET /api/collections/{collection}/documents`.
@@ -215,22 +185,6 @@ impl ApiClient {
 
 /// Same-origin API root. During `trunk serve` on port 8081 it targets the
 /// dashboard binary on port 8090.
-fn default_base() -> String {
-    let Some(window) = web_sys::window() else {
-        return "/api".to_string();
-    };
-    let location = window.location();
-    let port = location.port().unwrap_or_default();
-    if port.is_empty() || port == "8090" {
-        "/api".to_string()
-    } else {
-        let host = location
-            .hostname()
-            .unwrap_or_else(|_| "127.0.0.1".to_string());
-        format!("http://{host}:8090/api")
-    }
-}
-
 fn encode(value: &str) -> String {
     js_sys::encode_uri_component(value)
         .as_string()

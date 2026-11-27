@@ -10,8 +10,9 @@ use std::time::Duration;
 
 use qdrant_client::qdrant::{
     point_id::PointIdOptions, vectors_config, CountPointsBuilder, CreateCollectionBuilder,
-    DeleteCollectionBuilder, DeletePointsBuilder, Distance, QueryPointsBuilder,
-    ScrollPointsBuilder, SetPayloadPointsBuilder, UpsertPointsBuilder, VectorParamsBuilder,
+    DeleteCollectionBuilder, DeletePointsBuilder, Distance, PayloadIncludeSelector, PointId,
+    QueryPointsBuilder, ScrollPointsBuilder, SetPayloadPointsBuilder, UpsertPointsBuilder,
+    VectorParamsBuilder,
 };
 use qdrant_client::{Qdrant, QdrantError};
 
@@ -34,6 +35,21 @@ const READY_POLL: Duration = Duration::from_millis(500);
 pub struct StoredPoint {
     pub id: String,
     pub payload: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Payload selection for the shared Qdrant scroll path.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ScrollPayloadSelection {
+    None,
+    All,
+    Include(&'static [&'static str]),
+}
+
+/// One stored-point page plus Qdrant's cursor for the following page.
+#[derive(Debug, Clone)]
+pub(crate) struct StoredPointPage {
+    pub points: Vec<StoredPoint>,
+    pub next_cursor: Option<String>,
 }
 
 /// Connection to a Qdrant server.
@@ -191,27 +207,16 @@ impl QdrantStore {
         filter: Filter,
         limit: u32,
     ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>> {
-        let response = self
-            .client
-            .scroll(
-                ScrollPointsBuilder::new(collection)
-                    .filter(filter)
-                    .limit(limit)
-                    .with_payload(true),
+        let page = self
+            .scroll_page(
+                collection,
+                Some(filter),
+                limit,
+                None,
+                ScrollPayloadSelection::All,
             )
-            .await
-            .map_err(|error| map_error(Some(collection), error))?;
-        Ok(response
-            .result
-            .into_iter()
-            .map(|point| {
-                point
-                    .payload
-                    .into_iter()
-                    .map(|(key, value)| (key, serde_json::Value::from(value)))
-                    .collect()
-            })
-            .collect())
+            .await?;
+        Ok(page.points.into_iter().map(|point| point.payload).collect())
     }
 
     /// Scrolls matching points and returns their ids together with payloads.
@@ -224,36 +229,10 @@ impl QdrantStore {
         filter: Option<Filter>,
         limit: u32,
     ) -> Result<Vec<StoredPoint>> {
-        let mut builder = ScrollPointsBuilder::new(collection)
-            .limit(limit)
-            .with_payload(true);
-        if let Some(filter) = filter {
-            builder = builder.filter(filter);
-        }
-        let response = self
-            .client
-            .scroll(builder)
-            .await
-            .map_err(|error| map_error(Some(collection), error))?;
-        Ok(response
-            .result
-            .into_iter()
-            .map(|point| {
-                let id = match point.id.and_then(|id| id.point_id_options) {
-                    Some(PointIdOptions::Uuid(value)) => value,
-                    Some(PointIdOptions::Num(value)) => value.to_string(),
-                    None => String::new(),
-                };
-                StoredPoint {
-                    id,
-                    payload: point
-                        .payload
-                        .into_iter()
-                        .map(|(key, value)| (key, serde_json::Value::from(value)))
-                        .collect(),
-                }
-            })
-            .collect())
+        Ok(self
+            .scroll_page(collection, filter, limit, None, ScrollPayloadSelection::All)
+            .await?
+            .points)
     }
 
     /// Scrolls matching points and returns their UUID point ids.
@@ -263,34 +242,78 @@ impl QdrantStore {
         filter: Filter,
         limit: u32,
     ) -> Result<Vec<uuid::Uuid>> {
-        let response = self
-            .client
-            .scroll(
-                ScrollPointsBuilder::new(collection)
-                    .filter(filter)
-                    .limit(limit)
-                    .with_payload(false),
+        let page = self
+            .scroll_page(
+                collection,
+                Some(filter),
+                limit,
+                None,
+                ScrollPayloadSelection::None,
             )
-            .await
-            .map_err(|error| map_error(Some(collection), error))?;
-        let mut ids = Vec::with_capacity(response.result.len());
-        for point in response.result {
-            let point_id = point
-                .id
-                .ok_or_else(|| KbError::Qdrant("point is missing an id".to_string()))?;
-            match point_id.point_id_options {
-                Some(PointIdOptions::Uuid(value)) => {
-                    ids.push(uuid::Uuid::parse_str(&value).map_err(|error| {
-                        KbError::Qdrant(format!("invalid UUID point id '{value}': {error}"))
-                    })?);
-                }
-                Some(PointIdOptions::Num(value)) => {
-                    return Err(KbError::Qdrant(format!("point id {value} is not a UUID")));
-                }
-                None => return Err(KbError::Qdrant("point id has no value".to_string())),
-            }
+            .await?;
+        let mut ids = Vec::with_capacity(page.points.len());
+        for point in page.points {
+            ids.push(uuid::Uuid::parse_str(&point.id).map_err(|error| {
+                KbError::Qdrant(format!("invalid UUID point id '{}': {error}", point.id))
+            })?);
         }
         Ok(ids)
+    }
+
+    /// Shared cursor-based scroll used by the public browsing primitives.
+    pub(crate) async fn scroll_page(
+        &self,
+        collection: &str,
+        filter: Option<Filter>,
+        limit: u32,
+        cursor: Option<&str>,
+        payload: ScrollPayloadSelection,
+    ) -> Result<StoredPointPage> {
+        let mut builder = ScrollPointsBuilder::new(collection)
+            .limit(limit)
+            .with_vectors(false);
+        builder = match payload {
+            ScrollPayloadSelection::None => builder.with_payload(false),
+            ScrollPayloadSelection::All => builder.with_payload(true),
+            ScrollPayloadSelection::Include(fields) => {
+                builder.with_payload(PayloadIncludeSelector {
+                    fields: fields.iter().map(|field| (*field).to_string()).collect(),
+                })
+            }
+        };
+        if let Some(filter) = filter {
+            builder = builder.filter(filter);
+        }
+        if let Some(cursor) = cursor {
+            builder = builder.offset(cursor_to_point_id(cursor)?);
+        }
+        let response = self
+            .client
+            .scroll(builder)
+            .await
+            .map_err(|error| map_error(Some(collection), error))?;
+        let next_cursor = response
+            .next_page_offset
+            .and_then(|point_id| point_id_string(point_id.point_id_options));
+        let points = response
+            .result
+            .into_iter()
+            .map(|point| StoredPoint {
+                id: point
+                    .id
+                    .and_then(|point_id| point_id_string(point_id.point_id_options))
+                    .unwrap_or_default(),
+                payload: point
+                    .payload
+                    .into_iter()
+                    .map(|(key, value)| (key, serde_json::Value::from(value)))
+                    .collect(),
+            })
+            .collect();
+        Ok(StoredPointPage {
+            points,
+            next_cursor,
+        })
     }
 
     /// Overwrites the given payload keys on every point matching `filter`.
@@ -340,6 +363,30 @@ impl QdrantStore {
             .await
             .map_err(|error| map_error(Some(collection), error))?;
         Ok(response.result)
+    }
+}
+
+fn cursor_to_point_id(cursor: &str) -> Result<PointId> {
+    let cursor = cursor.trim();
+    if cursor.is_empty() {
+        return Err(KbError::Validation(
+            "pagination cursor must not be empty".to_string(),
+        ));
+    }
+    if let Ok(value) = cursor.parse::<u64>() {
+        return Ok(PointId::from(value));
+    }
+    let value = uuid::Uuid::parse_str(cursor).map_err(|_| {
+        KbError::Validation("pagination cursor must be a Qdrant UUID or u64 point id".to_string())
+    })?;
+    Ok(PointId::from(value.to_string()))
+}
+
+fn point_id_string(value: Option<PointIdOptions>) -> Option<String> {
+    match value {
+        Some(PointIdOptions::Uuid(value)) => Some(value),
+        Some(PointIdOptions::Num(value)) => Some(value.to_string()),
+        None => None,
     }
 }
 

@@ -5,8 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["local-embedding"]
+default = ["local-embedding", "local-rerank"]
 local-embedding = ["dep:fastembed"]
+local-rerank = ["dep:fastembed"]
 
 [dependencies]
 async-trait = "0.1"
@@ -16,7 +17,7 @@ fastembed = { version = "7.8.0", optional = true }
 figment = { version = "0.10.19", features = ["toml", "env"] }
 futures = "0.3"
 qdrant-client = { version = "1.20.0", default-features = false, features = ["serde"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 scraper = "0.29.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -25,6 +26,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "v5"] }
+zip = { version = "4.6", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 serial_test = "3"

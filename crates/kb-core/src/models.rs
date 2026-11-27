@@ -118,10 +118,45 @@ pub struct SearchHitMetadata {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchHit {
     pub score: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerank_score: Option<f32>,
     pub doc_id: String,
     pub chunk_index: u64,
     pub text: String,
     pub metadata: SearchHitMetadata,
+}
+
+/// One page returned by a cursor-based browsing API.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Page<T> {
+    pub items: Vec<T>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+/// A document-level summary assembled from its first stored chunk.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DocumentSummary {
+    pub doc_id: String,
+    pub title: Option<String>,
+    pub source: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub chunk_count: u64,
+    pub embedding_model: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// A stored chunk returned by the document browsing API.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DocumentChunk {
+    pub point_id: String,
+    pub chunk_index: u64,
+    pub text: String,
+    #[serde(default)]
+    pub heading_path: String,
+    #[serde(default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Collection summary returned by the collection endpoints.
@@ -209,5 +244,26 @@ mod tests {
         assert_eq!(req.top_k, 5);
         assert!(req.score_threshold.is_none());
         assert!(req.filter.is_none());
+    }
+
+    #[test]
+    fn omits_absent_rerank_score_and_cursor() {
+        let hit = SearchHit {
+            score: 0.75,
+            rerank_score: None,
+            doc_id: "doc".to_string(),
+            chunk_index: 0,
+            text: "text".to_string(),
+            metadata: SearchHitMetadata::default(),
+        };
+        let value = serde_json::to_value(hit).unwrap();
+        assert!(value.get("rerank_score").is_none());
+
+        let page = Page {
+            items: vec![1_u8],
+            next_cursor: None,
+        };
+        let value = serde_json::to_value(page).unwrap();
+        assert!(value.get("next_cursor").is_none());
     }
 }

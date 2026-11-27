@@ -8,6 +8,7 @@ pub mod embedding;
 pub mod error;
 pub mod ingest;
 pub mod models;
+pub mod rerank;
 pub mod service;
 pub mod store;
 

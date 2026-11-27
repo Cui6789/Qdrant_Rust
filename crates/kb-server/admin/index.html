@@ -1,0 +1,901 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="description" content="KB Server 向量库管理运维界面">
+    <title>向量库管理</title>
+    <link rel="stylesheet" href="/admin/admin.css">
+    <script src="/admin/admin.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <h1>向量库管理</h1>
+        </div>
+        <div class="topbar-actions">
+          <span id="sessionStatus" class="session-chip" data-state="idle">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="sessionStatusText">等待验证</span>
+          </span>
+          <button id="openSettingsButton" class="button button-quiet" type="button" disabled>
+            设置
+          </button>
+          <button id="logoutButton" class="button button-quiet" type="button" disabled>
+            退出
+          </button>
+        </div>
+      </header>
+
+      <div id="feedback" class="feedback" role="status" aria-live="polite" aria-atomic="true" data-tone="info">
+        <p id="feedbackMessage">输入管理员访问密钥以连接。</p>
+        <button id="feedbackDismiss" class="feedback-dismiss" type="button" aria-label="收起提示">
+          收起
+        </button>
+      </div>
+
+      <main id="main-content" class="main-content" tabindex="-1">
+        <section id="authView" class="auth-view" aria-labelledby="authTitle">
+          <div class="auth-panel">
+            <div class="auth-intro">
+              <h2 id="authTitle">管理员访问</h2>
+              <p>使用管理员访问密钥连接当前知识库服务。</p>
+            </div>
+
+            <form id="signInForm" class="auth-card" novalidate>
+              <div class="field">
+                <label for="accessKeyInput">管理员访问密钥</label>
+                <input
+                  id="accessKeyInput"
+                  name="access-key"
+                  type="password"
+                  autocomplete="off"
+                  autocapitalize="none"
+                  spellcheck="false"
+                  required
+                >
+              </div>
+              <p id="signInError" class="inline-alert" role="alert" hidden></p>
+              <button id="signInSubmit" class="button button-primary button-wide" type="submit">
+                验证并进入
+              </button>
+            </form>
+          </div>
+        </section>
+
+        <section id="adminView" class="admin-view" aria-label="向量库管理操作台" hidden>
+          <div class="workspace">
+            <aside class="collection-rail" aria-labelledby="collectionsHeading">
+              <div class="rail-heading">
+                <div>
+                  <h2 id="collectionsHeading">集合</h2>
+                </div>
+                <button
+                  id="refreshCollectionsButton"
+                  class="icon-button"
+                  type="button"
+                  aria-label="刷新集合列表"
+                  title="刷新集合列表"
+                >
+                  刷新
+                </button>
+              </div>
+              <div class="rail-summary">
+                <span>已载入</span>
+                <strong id="collectionsCount">0</strong>
+                <span>个集合</span>
+              </div>
+
+              <nav class="collection-nav" aria-label="集合列表">
+                <ul id="collectionList" class="collection-list"></ul>
+                <p id="collectionsEmpty" class="empty-note" hidden>尚未创建集合。</p>
+              </nav>
+
+              <form id="createCollectionForm" class="rail-create" novalidate>
+                <label for="collectionName">新建集合</label>
+                <div class="compact-form-row">
+                  <input
+                    id="collectionName"
+                    name="collection-name"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="集合名称"
+                    required
+                  >
+                  <button id="createCollectionSubmit" class="button button-secondary" type="submit">
+                    创建
+                  </button>
+                </div>
+                <p id="collectionFormStatus" class="inline-status" role="status" aria-live="polite"></p>
+              </form>
+
+              <p class="rail-footnote">集合删除后不可由此界面恢复。</p>
+            </aside>
+
+            <div class="ledger-column" aria-labelledby="selectedCollectionName">
+              <header class="ledger-heading">
+                <div class="ledger-title">
+                  <h2 id="selectedCollectionName">未选择集合</h2>
+                  <p id="selectedCollectionMeta">从左侧集合索引中选择一个集合。</p>
+                </div>
+                <dl class="ledger-metrics" aria-label="集合概况">
+                  <div>
+                    <dt>点数</dt>
+                    <dd id="selectedCollectionPoints">—</dd>
+                  </div>
+                  <div>
+                    <dt>向量维度</dt>
+                    <dd id="selectedCollectionVector">—</dd>
+                  </div>
+                </dl>
+              </header>
+
+              <div class="ledger-toolbar">
+                <div class="toolbar-group">
+                  <button id="refreshDocumentsButton" class="button button-secondary" type="button" disabled>
+                    刷新文档
+                  </button>
+                  <button id="openDocumentDialogButton" class="button button-secondary" type="button" disabled>
+                    录入文档
+                  </button>
+                  <button id="openUploadDialogButton" class="button button-secondary" type="button" disabled>
+                    上传文件
+                  </button>
+                  <button
+                    id="deleteCollectionButton"
+                    class="button button-danger-quiet"
+                    type="button"
+                    disabled
+                  >
+                    删除集合
+                  </button>
+                </div>
+                <p id="documentsStatus" class="inline-status" role="status" aria-live="polite"></p>
+              </div>
+
+              <section class="search-panel" aria-labelledby="searchHeading">
+                <div class="section-heading">
+                  <div>
+                    <h3 id="searchHeading">检索核验</h3>
+                  </div>
+                  <p class="section-note">命中内容来自当前集合，分数按服务端原值显示。</p>
+                </div>
+                <form id="searchForm" class="search-form" novalidate>
+                  <div class="field search-query-field">
+                    <label for="searchQuery">查询文本</label>
+                    <input
+                      id="searchQuery"
+                      name="query"
+                      type="search"
+                      autocomplete="off"
+                      placeholder="输入要核验的查询"
+                      required
+                      disabled
+                    >
+                  </div>
+                  <div class="field search-k-field">
+                    <label for="searchTopK">返回条数</label>
+                    <input
+                      id="searchTopK"
+                      name="top-k"
+                      type="number"
+                      min="1"
+                      step="1"
+                      value="10"
+                      inputmode="numeric"
+                      disabled
+                    >
+                  </div>
+                  <div class="field search-filter-field">
+                    <label for="searchDocIds">限定文档 ID</label>
+                    <input
+                      id="searchDocIds"
+                      name="doc-ids"
+                      type="text"
+                      autocomplete="off"
+                      placeholder="可选；使用逗号或换行分隔"
+                      disabled
+                    >
+                  </div>
+                  <button id="searchSubmit" class="button button-primary search-submit" type="submit" disabled>
+                    运行检索
+                  </button>
+                </form>
+                <p id="searchStatus" class="inline-status" role="status" aria-live="polite"></p>
+
+                <section id="searchResultsSection" class="search-results" aria-labelledby="searchResultsHeading" hidden>
+                  <div class="results-heading">
+                    <div>
+                      <h4 id="searchResultsHeading">检索命中</h4>
+                      <p id="searchSummary" class="section-note"></p>
+                    </div>
+                    <div class="toolbar-group">
+                      <button id="refreshSearchButton" class="button button-quiet" type="button">
+                        重跑检索
+                      </button>
+                      <button id="clearSearchButton" class="button button-quiet" type="button">
+                        清除结果
+                      </button>
+                    </div>
+                  </div>
+                  <ol id="searchResultsList" class="search-results-list"></ol>
+                  <p id="searchEmpty" class="empty-note" hidden>本次查询没有命中。</p>
+                </section>
+              </section>
+
+              <section class="document-section" aria-labelledby="documentsHeading">
+                <div class="section-heading document-heading">
+                  <div>
+                    <h3 id="documentsHeading">文档记录</h3>
+                  </div>
+                  <p id="documentsPageLabel" class="page-label">第 1 页</p>
+                </div>
+
+                <div class="table-wrap">
+                  <table class="ledger-table" aria-label="当前集合的文档账册">
+                    <thead>
+                      <tr>
+                        <th scope="col">文档 / 来源</th>
+                        <th scope="col">片段</th>
+                        <th scope="col">向量模型</th>
+                        <th scope="col">创建时间</th>
+                        <th scope="col">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="documentsBody"></tbody>
+                  </table>
+                  <p id="documentsEmpty" class="empty-note document-empty" hidden>
+                    当前集合还没有文档。可录入文本或上传文件。
+                  </p>
+                </div>
+
+                <div class="pagination" aria-label="文档分页">
+                  <button id="documentsPreviousButton" class="button button-quiet" type="button" disabled>
+                    上一页
+                  </button>
+                  <button id="documentsNextButton" class="button button-quiet" type="button" disabled>
+                    下一页
+                  </button>
+                </div>
+              </section>
+            </div>
+
+            <aside id="inspector" class="inspector" aria-labelledby="inspectorHeading">
+              <header class="inspector-heading">
+                <h2 id="inspectorHeading">片段账册</h2>
+                <p>选择一个文档，核对其 chunk_index、正文与附加数据。</p>
+              </header>
+
+              <form id="manualDocumentForm" class="manual-document-form" novalidate>
+                <label for="manualDocId">按文档 ID 检查</label>
+                <div class="compact-form-row">
+                  <input
+                    id="manualDocId"
+                    name="doc-id"
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="输入完整 doc_id"
+                    disabled
+                  >
+                  <button id="manualDocumentSubmit" class="button button-secondary" type="submit" disabled>
+                    检查
+                  </button>
+                </div>
+              </form>
+
+              <section id="selectedDocumentSummary" class="selected-document" aria-labelledby="selectedDocumentTitle" hidden>
+                <div class="selected-document-copy">
+                  <h3 id="selectedDocumentTitle"></h3>
+                  <p id="selectedDocumentMeta"></p>
+                </div>
+                <button
+                  id="deleteSelectedDocumentButton"
+                  class="text-button danger-text"
+                  type="button"
+                  disabled
+                >
+                  删除此文档
+                </button>
+              </section>
+
+              <div class="chunk-toolbar">
+                <h3>片段内容</h3>
+                <span id="chunkCountLabel" class="page-label"></span>
+              </div>
+              <p id="chunkStatus" class="inline-status" role="status" aria-live="polite"></p>
+              <p id="chunkEmpty" class="empty-note">尚未选择文档。</p>
+              <ol id="chunkList" class="chunk-list"></ol>
+              <button id="loadMoreChunksButton" class="button button-secondary button-wide" type="button" hidden>
+                加载更多片段
+              </button>
+            </aside>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="documentDialog" class="dialog dialog-medium" aria-labelledby="documentDialogTitle">
+      <form id="documentForm" class="dialog-form" novalidate>
+        <header class="dialog-heading">
+          <div>
+            <h2 id="documentDialogTitle">录入文档</h2>
+          </div>
+          <button class="dialog-close" type="button" data-close-dialog="documentDialog">关闭</button>
+        </header>
+        <div class="dialog-body form-stack">
+          <div class="form-grid form-grid-two">
+            <div class="field">
+              <label for="documentDocId">文档 ID（可选）</label>
+              <input id="documentDocId" name="doc_id" type="text" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="field">
+              <label for="documentFormat">内容格式</label>
+              <select id="documentFormat" name="format">
+                <option value="">站点默认（text）</option>
+                <option value="text">text</option>
+                <option value="markdown">markdown</option>
+                <option value="html">html</option>
+                <option value="json">json</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-grid form-grid-two">
+            <div class="field">
+              <label for="documentTitle">标题</label>
+              <input id="documentTitle" name="title" type="text" autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="documentSource">来源</label>
+              <input id="documentSource" name="source" type="text" autocomplete="off">
+            </div>
+          </div>
+          <div class="field">
+            <label for="documentTags">标签</label>
+            <input
+              id="documentTags"
+              name="tags"
+              type="text"
+              autocomplete="off"
+              placeholder="逗号分隔，例如：制度, 客服"
+            >
+          </div>
+          <div class="field">
+            <label for="documentText">正文</label>
+            <textarea id="documentText" name="text" rows="12" required></textarea>
+          </div>
+          <p id="documentFormStatus" class="inline-status" role="status" aria-live="polite"></p>
+        </div>
+        <footer class="dialog-actions">
+          <button class="button button-quiet" type="button" data-close-dialog="documentDialog">取消</button>
+          <button id="documentSubmit" class="button button-primary" type="submit">录入并切片</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="uploadDialog" class="dialog dialog-medium" aria-labelledby="uploadDialogTitle">
+      <form id="uploadForm" class="dialog-form" enctype="multipart/form-data" novalidate>
+        <header class="dialog-heading">
+          <div>
+            <h2 id="uploadDialogTitle">上传文件</h2>
+          </div>
+          <button class="dialog-close" type="button" data-close-dialog="uploadDialog">关闭</button>
+        </header>
+        <div class="dialog-body form-stack">
+          <div class="field">
+            <label for="uploadFile">文件</label>
+            <input id="uploadFile" name="file" type="file" required>
+          </div>
+          <div class="form-grid form-grid-two">
+            <div class="field">
+              <label for="uploadDocId">文档 ID（可选）</label>
+              <input id="uploadDocId" name="doc_id" type="text" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="field">
+              <label for="uploadParser">解析器</label>
+              <select id="uploadParser" name="parser">
+                <option value="">站点默认</option>
+                <option value="native">native</option>
+                <option value="mineru_local">mineru_local</option>
+                <option value="mineru_cloud">mineru_cloud</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-grid form-grid-two">
+            <div class="field">
+              <label for="uploadTitle">标题（可选）</label>
+              <input id="uploadTitle" name="title" type="text" autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="uploadSource">来源（可选）</label>
+              <input id="uploadSource" name="source" type="text" autocomplete="off">
+            </div>
+          </div>
+          <div class="field">
+            <label for="uploadTags">标签（可选）</label>
+            <input
+              id="uploadTags"
+              name="tags"
+              type="text"
+              autocomplete="off"
+              placeholder="逗号分隔"
+            >
+          </div>
+          <p class="field-help">上传进度长任务由服务端处理；提交期间按钮会保持禁用。</p>
+          <p id="uploadFormStatus" class="inline-status" role="status" aria-live="polite"></p>
+        </div>
+        <footer class="dialog-actions">
+          <button class="button button-quiet" type="button" data-close-dialog="uploadDialog">取消</button>
+          <button id="uploadSubmit" class="button button-primary" type="submit">上传并入库</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="settingsDialog" class="dialog dialog-wide settings-dialog" aria-labelledby="settingsDialogTitle">
+      <form id="settingsForm" class="dialog-form" novalidate>
+        <header class="dialog-heading">
+          <div>
+            <h2 id="settingsDialogTitle">服务设置</h2>
+            <p class="settings-intro">配置向量生成、检索排序和上传文件处理。</p>
+          </div>
+          <button id="settingsClose" class="dialog-close" type="button" data-close-dialog="settingsDialog">关闭设置</button>
+        </header>
+        <div class="settings-tabs" role="tablist" aria-label="服务设置分类">
+          <button id="settingsTabEmbedding" class="settings-tab" type="button" role="tab" aria-selected="true" aria-controls="settingsPanelEmbedding" data-settings-tab="embedding">
+            嵌入 <span class="settings-tab-dot" aria-label="有未保存修改" hidden></span>
+          </button>
+          <button id="settingsTabRerank" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelRerank" data-settings-tab="rerank" tabindex="-1">
+            重排 <span class="settings-tab-dot" aria-label="有未保存修改" hidden></span>
+          </button>
+          <button id="settingsTabParsing" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelParsing" data-settings-tab="parsing" tabindex="-1">
+            解析 <span class="settings-tab-dot" aria-label="有未保存修改" hidden></span>
+          </button>
+        </div>
+        <div class="dialog-body settings-body">
+          <fieldset id="settingsFields" class="settings-fields">
+          <section id="settingsPanelEmbedding" class="settings-section settings-section-embedding" role="tabpanel" aria-labelledby="settingsTabEmbedding">
+            <div class="settings-section-heading">
+              <div>
+                <h3 id="embeddingSettingsHeading">嵌入</h3>
+                <p>选择本地模型、API 服务或 Mock，并用已保存配置完成一次真实探针。</p>
+              </div>
+            </div>
+
+            <div class="embedding-active-console" aria-live="polite">
+              <div class="embedding-active-console-head">
+                <span class="embedding-console-kicker">当前生效</span>
+                <span id="settingEmbeddingProviderSummary" class="embedding-provider-summary">读取中</span>
+              </div>
+              <div class="embedding-active-values">
+                <div>
+                  <span class="embedding-data-label">模型</span>
+                  <output id="settingEmbeddingModel" class="embedding-active-model">—</output>
+                </div>
+                <div>
+                  <span class="embedding-data-label">向量维度</span>
+                  <output id="settingEmbeddingDimension" class="embedding-active-dimension">—</output>
+                </div>
+              </div>
+              <p class="embedding-console-note">
+                模型或维度变化后，已有集合需要重新生成向量。
+              </p>
+            </div>
+
+            <div class="form-grid form-grid-two">
+              <div class="field">
+                <label for="settingEmbeddingProvider">提供方</label>
+                <select id="settingEmbeddingProvider" name="embedding_provider" aria-controls="settingEmbeddingLocalFields settingEmbeddingApiFields settingEmbeddingMockFields">
+                  <option value="local">本地模型 · local</option>
+                  <option value="api">API 服务 · api</option>
+                  <option value="mock">Mock 演示 · mock</option>
+                </select>
+              </div>
+              <div class="field embedding-provider-guidance">
+                <span class="field-label">切换说明</span>
+                <p id="settingEmbeddingProviderHelp" class="field-help">
+                  本地模型在当前进程内运行，无需 API 密钥。
+                </p>
+              </div>
+            </div>
+
+            <div id="settingEmbeddingLocalFields" class="embedding-config-panel">
+              <div class="form-grid form-grid-two">
+                <div class="field">
+                  <label for="settingEmbeddingLocalModel">本地模型</label>
+                  <select id="settingEmbeddingLocalModel" name="embedding_local_model">
+                    <option value="bge-small-zh-v1.5">bge-small-zh-v1.5</option>
+                    <option value="bge-large-zh-v1.5">bge-large-zh-v1.5</option>
+                    <option value="bge-m3">bge-m3</option>
+                    <option value="multilingual-e5-small">multilingual-e5-small</option>
+                    <option value="multilingual-e5-base">multilingual-e5-base</option>
+                    <option value="multilingual-e5-large">multilingual-e5-large</option>
+                    <option value="bge-small-en-v1.5">bge-small-en-v1.5</option>
+                    <option value="all-minilm-l6-v2">all-minilm-l6-v2</option>
+                    <option value="nomic-embed-text-v1.5">nomic-embed-text-v1.5</option>
+                  </select>
+                  <p class="field-help">首次使用可能需要下载模型。</p>
+                </div>
+                <div class="field">
+                  <label for="settingEmbeddingLocalDimensions">输出维度</label>
+                  <input id="settingEmbeddingLocalDimensions" name="embedding_local_dimensions" type="number" min="0" step="1" inputmode="numeric" value="0" aria-describedby="settingEmbeddingLocalDimensionsHelp">
+                  <p id="settingEmbeddingLocalDimensionsHelp" class="field-help" aria-live="polite">填 0 使用模型原始维度。</p>
+                </div>
+              </div>
+              <p class="field-help">降低维度会缩短向量，可能影响检索效果。</p>
+            </div>
+
+            <div id="settingEmbeddingApiFields" class="embedding-config-panel" hidden>
+              <div class="embedding-presets" role="group" aria-label="API 服务快速预设">
+                <span class="embedding-presets-label">快速填入</span>
+                <button class="embedding-preset" type="button" data-embedding-preset="openai">OpenAI</button>
+                <button class="embedding-preset" type="button" data-embedding-preset="qwen-maas">通义 MaaS</button>
+                <button class="embedding-preset" type="button" data-embedding-preset="qwen-native">通义原生</button>
+                <button class="embedding-preset" type="button" data-embedding-preset="bailian">百炼兼容</button>
+                <button class="embedding-preset" type="button" data-embedding-preset="siliconflow">SiliconFlow</button>
+                <button class="embedding-preset" type="button" data-embedding-preset="ollama">Ollama</button>
+              </div>
+
+              <div class="form-grid form-grid-two">
+                <div class="field">
+                  <label for="settingEmbeddingApiProtocol">接口协议</label>
+                  <select id="settingEmbeddingApiProtocol" name="embedding_api_protocol">
+                    <option value="openai">OpenAI 兼容</option>
+                    <option value="dashscope">DashScope 原生</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="settingEmbeddingApiDimensions">API 维度</label>
+                  <input
+                    id="settingEmbeddingApiDimensions"
+                    name="embedding_api_dimensions"
+                    type="number"
+                    min="0"
+                    step="1"
+                    inputmode="numeric"
+                    value="0"
+                  >
+                  <p class="field-help">填 0 时由服务端自动探测。</p>
+                </div>
+                <div class="field field-span-two">
+                  <label for="settingEmbeddingApiBaseUrl">Base URL</label>
+                  <input
+                    id="settingEmbeddingApiBaseUrl"
+                    name="embedding_api_base_url"
+                    type="url"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="https://api.openai.com/v1"
+                  >
+                </div>
+                <div class="field">
+                  <label for="settingEmbeddingApiModel">API 模型</label>
+                  <input
+                    id="settingEmbeddingApiModel"
+                    name="embedding_api_model"
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="text-embedding-3-small"
+                  >
+                </div>
+              </div>
+
+              <p id="settingEmbeddingApiProtocolHint" class="field-help">
+                自动追加 /embeddings，适用于 OpenAI、兼容模式、SiliconFlow、Ollama 与兼容网关。
+              </p>
+
+              <div class="secret-field">
+                <div class="field">
+                  <label for="settingEmbeddingApiKey">API 密钥</label>
+                  <input
+                    id="settingEmbeddingApiKey"
+                    name="embedding_api_key"
+                    type="password"
+                    autocomplete="new-password"
+                    placeholder="留空表示不修改"
+                  >
+                  <p class="field-help">密钥写入后不会回显；只有此密码输入框会承载新值。</p>
+                </div>
+                <div class="secret-side">
+                  <span id="settingEmbeddingApiKeySet" class="secret-state">未配置</span>
+                  <label class="check-field" for="settingEmbeddingApiKeyClear">
+                    <input id="settingEmbeddingApiKeyClear" type="checkbox">
+                    <span>清除已保存密钥</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <div id="settingEmbeddingMockFields" class="embedding-config-panel" hidden>
+              <div class="field">
+                <label for="settingEmbeddingMockDimensions">Mock 维度</label>
+                <input
+                  id="settingEmbeddingMockDimensions"
+                  name="embedding_mock_dimensions"
+                  type="number"
+                  min="1"
+                  max="4096"
+                  step="1"
+                  inputmode="numeric"
+                >
+              </div>
+              <div class="field embedding-provider-guidance">
+                <span class="field-label">适用场景</span>
+                <p class="field-help">
+                  Mock 返回确定性向量，便于在无 API 或离线环境中验证入库与检索流程。
+                </p>
+              </div>
+            </div>
+
+            <div class="embedding-operation-bar">
+              <div class="embedding-operation-copy">
+                <strong>已保存配置检查</strong>
+                <span>测试调用最近一次保存的模型；未保存的编辑不会被发送。</span>
+              </div>
+              <div class="embedding-operation-actions">
+                <button id="testEmbeddingButton" class="button button-secondary" type="button" disabled>
+                  测试当前模型
+                </button>
+                <button id="restoreEmbeddingButton" class="button button-danger-quiet" type="button" disabled>
+                  恢复启动配置
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <section id="settingsPanelRerank" class="settings-section settings-provider-section" role="tabpanel" aria-labelledby="settingsTabRerank" hidden>
+            <div class="settings-section-heading settings-provider-heading">
+              <div>
+                <h3>检索结果重排</h3>
+                <p>向量检索召回候选片段后，可按它们与问题的相关性重新排序。</p>
+              </div>
+              <p class="settings-live" aria-live="polite"><span>当前生效</span><strong id="rerankActiveSummary">—</strong></p>
+            </div>
+
+            <div class="provider-picker" role="group" aria-labelledby="rerankProviderLabel">
+              <p id="rerankProviderLabel" class="field-label">重排方式</p>
+              <div class="provider-options">
+                <label class="provider-option">
+                  <input type="radio" name="rerank_provider" value="disabled" checked>
+                  <span><strong>关闭重排</strong><small>直接按向量相似度排序。</small></span>
+                </label>
+                <label class="provider-option">
+                  <input type="radio" name="rerank_provider" value="local">
+                  <span><strong>本地模型</strong><small>在知识库服务内运行，不发送查询或片段。</small></span>
+                </label>
+                <label class="provider-option">
+                  <input type="radio" name="rerank_provider" value="api">
+                  <span><strong>API 服务</strong><small>将问题和候选片段发给指定接口评分。</small></span>
+                </label>
+              </div>
+            </div>
+
+            <div class="provider-route">
+              <span class="provider-route-label">所选方式的处理路径</span>
+              <div class="provider-route-flow">
+                <span>向量召回</span><span aria-hidden="true">→</span>
+                <strong id="rerankRouteStep">按相似度排序</strong><span aria-hidden="true">→</span>
+                <span>返回结果</span>
+              </div>
+            </div>
+
+            <p id="rerankDisabledFields" class="provider-config-note">关闭后不调用重排模型，仍可正常检索。</p>
+            <div id="rerankEnabledFields" class="provider-config" hidden>
+              <div id="rerankLocalFields" class="field" hidden>
+                <label for="settingRerankLocalModel">本地重排模型</label>
+                <select id="settingRerankLocalModel" name="rerank_local_model" aria-describedby="rerankLocalHelp">
+                  <option value="bge-reranker-base">bge-reranker-base</option>
+                  <option value="bge-reranker-v2-m3">bge-reranker-v2-m3</option>
+                  <option value="jina-reranker-v1-turbo-en">jina-reranker-v1-turbo-en</option>
+                  <option value="jina-reranker-v2-base-multilingual">jina-reranker-v2-base-multilingual</option>
+                </select>
+                <p id="rerankLocalHelp" class="field-help">首次切换到未缓存的模型，保存时需要下载和加载权重。</p>
+              </div>
+              <div id="rerankApiFields" class="provider-config-fields" hidden>
+                <div class="form-grid form-grid-two">
+                  <div class="field">
+                    <label for="settingRerankApiEndpoint">完整重排接口地址</label>
+                    <input id="settingRerankApiEndpoint" name="rerank_api_endpoint" type="url" autocomplete="off" spellcheck="false" placeholder="https://api.siliconflow.com/v1/rerank" aria-describedby="rerankEndpointHelp">
+                    <p id="rerankEndpointHelp" class="field-help">填写完整的 <code>/rerank</code> 接口地址，服务不会自动补路径。</p>
+                  </div>
+                  <div class="field">
+                    <label for="settingRerankApiModel">API 模型名称</label>
+                    <input id="settingRerankApiModel" name="rerank_api_model" type="text" autocomplete="off" spellcheck="false" placeholder="Qwen/Qwen3-Reranker-8B">
+                    <p class="field-help">使用服务商提供的模型 ID，保留名称前缀。</p>
+                  </div>
+                </div>
+                <div class="secret-field">
+                  <div class="field">
+                    <label for="settingRerankApiKey">重排 API 密钥</label>
+                    <input id="settingRerankApiKey" name="rerank_api_key" type="password" autocomplete="new-password" placeholder="留空保留已保存密钥">
+                    <p class="field-help">接口要求鉴权时填写。无需鉴权的接口可留空。</p>
+                  </div>
+                  <div class="secret-side">
+                    <span id="settingRerankApiKeySet" class="secret-state">未配置</span>
+                    <label class="check-field" for="settingRerankApiKeyClear">
+                      <input id="settingRerankApiKeyClear" type="checkbox">
+                      <span>保存时清除已保存密钥</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+              <div class="field">
+                <label for="settingRerankCandidateLimit">重排候选数量</label>
+                <input
+                  id="settingRerankCandidateLimit"
+                  name="rerank_candidate_limit"
+                  type="number"
+                  min="1"
+                  max="100"
+                  step="1"
+                  inputmode="numeric"
+                  aria-describedby="rerankCandidateHelp"
+                >
+                <p id="rerankCandidateHelp" class="field-help">设为 1–100。它决定参与重排的候选片段数量，不改变最终返回条数；候选越多通常越慢。若请求的返回条数更多，服务会扩大召回量。</p>
+              </div>
+            </div>
+          </section>
+
+          <section id="settingsPanelParsing" class="settings-section settings-provider-section" role="tabpanel" aria-labelledby="settingsTabParsing" hidden>
+            <div class="settings-section-heading settings-provider-heading">
+              <div>
+                <h3>上传文件解析</h3>
+                <p>选择 PDF、图片和 Office 等文件的默认处理方式，提取内容后再切块入库。</p>
+              </div>
+              <p class="settings-live" aria-live="polite"><span>当前生效</span><strong id="parsingActiveSummary">—</strong></p>
+            </div>
+
+            <div class="provider-picker" role="group" aria-labelledby="parsingProviderLabel">
+              <p id="parsingProviderLabel" class="field-label">默认解析方式</p>
+              <div class="provider-options">
+                <label class="provider-option">
+                  <input type="radio" name="parsing_provider" value="native" checked>
+                  <span><strong>原生解析</strong><small>处理文本、Markdown、HTML 与 JSON。</small></span>
+                </label>
+                <label class="provider-option">
+                  <input type="radio" name="parsing_provider" value="mineru_local">
+                  <span><strong>本地 MinerU</strong><small>把文件发送到自己部署的 MinerU 服务。</small></span>
+                </label>
+                <label class="provider-option">
+                  <input type="radio" name="parsing_provider" value="mineru_cloud">
+                  <span><strong>MinerU 云端 API</strong><small>上传到云端处理，需要访问令牌。</small></span>
+                </label>
+              </div>
+            </div>
+
+            <div class="provider-route">
+              <span class="provider-route-label">所选方式的处理路径</span>
+              <div class="provider-route-flow">
+                <span id="parsingRouteInput">文本类上传</span><span aria-hidden="true">→</span>
+                <strong id="parsingRouteStep">服务内解析</strong><span aria-hidden="true">→</span>
+                <span>提取正文</span>
+              </div>
+            </div>
+            <p id="parsingNativeFields" class="provider-config-note">不调用外部服务。PDF、图片和 Office 文件需要选择 MinerU 后才能解析。</p>
+            <div id="parsingLocalFields" class="provider-config" hidden>
+              <div class="field">
+                <label for="settingMineruLocalUrl">本地 MinerU 完整接口地址</label>
+                <input id="settingMineruLocalUrl" name="mineru_local_url" type="url" autocomplete="off" spellcheck="false" placeholder="http://mineru:8003/v1/file_parse" aria-describedby="mineruLocalHelp">
+                <p id="mineruLocalHelp" class="field-help">请填写从知识库服务可访问的地址，包含 <code>/v1/file_parse</code> 或旧版 <code>/file_parse</code>。Docker Compose 同网络可使用 <code>http://mineru:8003/v1/file_parse</code>。</p>
+              </div>
+              <p class="provider-config-note">模型由本地 MinerU 服务配置，这里只负责连接。</p>
+            </div>
+            <div id="parsingCloudFields" class="provider-config" hidden>
+              <div class="form-grid form-grid-two">
+                <div class="field">
+                  <label for="settingMineruCloudUrl">云端 API 根地址</label>
+                  <input id="settingMineruCloudUrl" name="mineru_cloud_url" type="url" autocomplete="off" spellcheck="false" placeholder="https://mineru.net/api/v4" aria-describedby="mineruCloudUrlHelp">
+                  <p id="mineruCloudUrlHelp" class="field-help">填写 API 根地址，通常保留 <code>/api/v4</code>，无需附加上传路径。</p>
+                </div>
+                <div class="field">
+                  <label for="settingMineruModelVersion">云端解析模型</label>
+                  <select id="settingMineruModelVersion" name="mineru_model_version" aria-describedby="mineruCloudModelHelp">
+                    <option value="vlm">VLM · 文档解析</option>
+                    <option value="pipeline">Pipeline · 文档解析</option>
+                    <option value="MinerU-HTML">MinerU-HTML · 仅 HTML</option>
+                  </select>
+                  <p id="mineruCloudModelHelp" class="field-help">VLM 与 Pipeline 用于文档文件。MinerU-HTML 仅用于显式选择云端解析的 HTML 上传。</p>
+                </div>
+              </div>
+              <div class="secret-field">
+                <div class="field">
+                  <label for="settingMineruApiKey">MinerU 云端访问令牌</label>
+                  <input id="settingMineruApiKey" name="mineru_api_key" type="password" autocomplete="new-password" placeholder="留空保留已保存令牌">
+                  <p class="field-help">云端方式必须配置令牌；保存后不回显。</p>
+                </div>
+                <div class="secret-side">
+                  <span id="settingMineruApiKeySet" class="secret-state">未配置</span>
+                </div>
+              </div>
+            </div>
+            <p id="parsingKeepLocalNote" class="provider-config-note" hidden>文本、Markdown、HTML 和 JSON 默认仍由原生解析处理；也可在上传时单独指定方式。</p>
+            <label class="check-field" for="settingMineruApiKeyClear" id="clearInactiveMineruKey" hidden>
+              <input id="settingMineruApiKeyClear" type="checkbox">
+              <span>保存时移除云端访问令牌</span>
+            </label>
+          </section>
+          </fieldset>
+        </div>
+        <footer class="dialog-actions settings-actions">
+          <div class="settings-action-copy">
+            <p id="settingsActionHint" class="field-help">保存只应用当前标签页的修改。</p>
+            <p id="settingsFormStatus" class="inline-status" role="status" aria-live="polite"></p>
+          </div>
+          <div class="settings-action-buttons">
+            <button id="settingsDiscard" class="button button-quiet" type="button" disabled>撤销本页修改</button>
+            <button id="settingsProbe" class="button button-secondary" type="button" hidden>测试当前设置</button>
+            <button id="settingsStopProbe" class="button button-secondary" type="button" hidden>停止等待测试</button>
+            <button id="settingsSubmit" class="button button-primary" type="submit" disabled>保存并应用嵌入</button>
+          </div>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="embeddingResultDialog" class="dialog dialog-result" aria-labelledby="embeddingResultTitle" aria-describedby="embeddingResultMessage">
+      <div class="dialog-form">
+        <header class="dialog-heading">
+          <div>
+            <p id="embeddingResultKicker" class="dialog-kicker">模型探针</p>
+            <h2 id="embeddingResultTitle">测试结果</h2>
+          </div>
+          <button class="dialog-close" type="button" data-close-dialog="embeddingResultDialog">关闭</button>
+        </header>
+        <div class="dialog-body embedding-result-body">
+          <div class="embedding-result-heading">
+            <p id="embeddingResultMessage" class="embedding-result-message" role="status" aria-live="polite"></p>
+            <span id="embeddingResultLatency" class="embedding-result-latency" hidden>—</span>
+          </div>
+          <dl class="embedding-result-metrics">
+            <div>
+              <dt>模型</dt>
+              <dd id="embeddingResultModel">—</dd>
+            </div>
+            <div>
+              <dt>维度</dt>
+              <dd id="embeddingResultDimension">—</dd>
+            </div>
+            <div>
+              <dt>L2 范数</dt>
+              <dd id="embeddingResultNorm">—</dd>
+            </div>
+          </dl>
+          <div id="embeddingProbeChart" class="embedding-probe-chart" hidden>
+            <div class="embedding-probe-chart-head">
+              <span>向量样本</span>
+              <span id="embeddingProbeSampleMeta">—</span>
+            </div>
+            <div id="embeddingProbeBars" class="embedding-probe-bars" role="img" aria-label="模型返回的向量样本"></div>
+          </div>
+        </div>
+        <footer class="dialog-actions">
+          <button class="button button-primary" type="button" data-close-dialog="embeddingResultDialog">完成</button>
+        </footer>
+      </div>
+    </dialog>
+
+    <dialog id="confirmDialog" class="dialog dialog-small" aria-labelledby="confirmDialogTitle">
+      <div class="dialog-form">
+        <header class="dialog-heading">
+          <div>
+            <h2 id="confirmDialogTitle">确认删除</h2>
+          </div>
+        </header>
+        <div class="dialog-body">
+          <p id="confirmDialogMessage" class="confirm-message"></p>
+        </div>
+        <footer class="dialog-actions">
+          <button id="confirmCancelButton" class="button button-quiet" type="button">取消</button>
+          <button id="confirmAcceptButton" class="button button-danger" type="button">确认删除</button>
+        </footer>
+      </div>
+    </dialog>
+
+    <noscript>
+      <p class="noscript-message">此管理界面需要 JavaScript。请启用后刷新页面。</p>
+    </noscript>
+  </body>
+</html>

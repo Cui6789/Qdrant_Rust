@@ -1,40 +1,154 @@
-# Qdrant + kb-server. Both services keep their state in ./data, which is
-# git-ignored. Optional overrides can be placed in a `.env` file next to this
-# one (see .env.example); Compose interpolates them into the environment below.
+# Development/default runtime for Qdrant, kb-server and the Yew workbench.
+# Compose reads .env when present; no secrets are stored in this file.
+
+x-app-build: &app-build
+  context: .
+  dockerfile: Dockerfile
+  target: runtime
 
 services:
   qdrant:
     image: qdrant/qdrant:v1.20.2
     ports:
-      # Dashboard/REST bound to localhost only. Never expose Qdrant without an
-      # API key or an authenticating proxy in front of it.
-      - "127.0.0.1:6333:6333"
-      # gRPC 6334 is intentionally not published: kb-server reaches Qdrant over
-      # the Compose network (KB_QDRANT__URL=http://qdrant:6334).
+      - "127.0.0.1:${QDRANT_HTTP_PORT:-6333}:6333"
+      - "127.0.0.1:${QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
-      - ./data/qdrant:/qdrant/storage
+      - qdrant-storage:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "bash", "-c", ": > /dev/tcp/127.0.0.1/6333"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
     restart: unless-stopped
 
   kb-server:
-    build: .
+    image: qdrant-rust-app:dev
+    build: *app-build
+    command: ["kb-server"]
     ports:
-      - "8080:8080"
+      - "127.0.0.1:${KB_SERVER_HTTP_PORT:-8080}:8080"
+      - "127.0.0.1:${KB_DASHBOARD_HTTP_PORT:-8090}:8090"
     environment:
-      # Required wiring for the container network.
-      KB_QDRANT__URL: http://qdrant:6334
-      KB_EMBEDDING__LOCAL__CACHE_DIR: /data/models
-      # Optional overrides (defaults match config/config.example.toml).
+      KB_CONFIG: /app/config/config.toml
+      KB_SERVER__HOST: 0.0.0.0
+      KB_SERVER__PORT: "8080"
       KB_SERVER__API_KEY: ${KB_SERVER__API_KEY:-}
+      KB_SERVER__MAX_BODY_MB: ${KB_SERVER__MAX_BODY_MB:-32}
+      KB_SERVER__REQUEST_TIMEOUT_SECS: ${KB_SERVER__REQUEST_TIMEOUT_SECS:-300}
+      KB_QDRANT__URL: http://qdrant:6334
+      KB_QDRANT__API_KEY: ${KB_QDRANT__API_KEY:-}
+      KB_QDRANT__TIMEOUT_SECS: ${KB_QDRANT__TIMEOUT_SECS:-30}
+      KB_QDRANT__STARTUP_RETRY_SECS: ${KB_QDRANT__STARTUP_RETRY_SECS:-30}
+      KB_ADMIN__ACCESS_KEY: ${KB_ADMIN__ACCESS_KEY:-}
+      KB_ADMIN__SETTINGS_PATH: /data/settings/runtime.json
+      DASHBOARD_HOST: 0.0.0.0
+      DASHBOARD_PORT: "8090"
+
       KB_EMBEDDING__PROVIDER: ${KB_EMBEDDING__PROVIDER:-local}
+      KB_EMBEDDING__BATCH_SIZE: ${KB_EMBEDDING__BATCH_SIZE:-32}
+      KB_EMBEDDING__MAX_CONCURRENT_BATCHES: ${KB_EMBEDDING__MAX_CONCURRENT_BATCHES:-4}
       KB_EMBEDDING__LOCAL__MODEL: ${KB_EMBEDDING__LOCAL__MODEL:-bge-small-zh-v1.5}
+      KB_EMBEDDING__LOCAL__DIMENSIONS: ${KB_EMBEDDING__LOCAL__DIMENSIONS:-0}
+      KB_EMBEDDING__LOCAL__CACHE_DIR: /data/models
+      KB_EMBEDDING__LOCAL__SHOW_DOWNLOAD_PROGRESS: ${KB_EMBEDDING__LOCAL__SHOW_DOWNLOAD_PROGRESS:-true}
+      KB_EMBEDDING__LOCAL__MAX_LENGTH: ${KB_EMBEDDING__LOCAL__MAX_LENGTH:-512}
+      KB_EMBEDDING__LOCAL__WARMUP: ${KB_EMBEDDING__LOCAL__WARMUP:-true}
+      KB_EMBEDDING__LOCAL__QUERY_PREFIX: ${KB_EMBEDDING__LOCAL__QUERY_PREFIX:-}
+      KB_EMBEDDING__LOCAL__DOCUMENT_PREFIX: ${KB_EMBEDDING__LOCAL__DOCUMENT_PREFIX:-}
+      KB_EMBEDDING__API__PROTOCOL: ${KB_EMBEDDING__API__PROTOCOL:-openai}
       KB_EMBEDDING__API__BASE_URL: ${KB_EMBEDDING__API__BASE_URL:-https://api.openai.com/v1}
       KB_EMBEDDING__API__API_KEY: ${KB_EMBEDDING__API__API_KEY:-}
       KB_EMBEDDING__API__MODEL: ${KB_EMBEDDING__API__MODEL:-text-embedding-3-small}
       KB_EMBEDDING__API__DIMENSIONS: ${KB_EMBEDDING__API__DIMENSIONS:-0}
-      # Hugging Face mirror used when downloading local models.
+      KB_EMBEDDING__API__TIMEOUT_SECS: ${KB_EMBEDDING__API__TIMEOUT_SECS:-60}
+      KB_EMBEDDING__API__MAX_RETRIES: ${KB_EMBEDDING__API__MAX_RETRIES:-3}
+      KB_EMBEDDING__MOCK_DIMENSIONS: ${KB_EMBEDDING__MOCK_DIMENSIONS:-512}
       HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
+
+      KB_PARSING__PROVIDER: ${KB_PARSING__PROVIDER:-native}
+      KB_PARSING__MINERU__LOCAL_URL: ${KB_PARSING__MINERU__LOCAL_URL:-http://mineru:8003/v1/file_parse}
+      KB_PARSING__MINERU__CLOUD_URL: ${KB_PARSING__MINERU__CLOUD_URL:-https://mineru.net/api/v4}
+      KB_PARSING__MINERU__API_KEY: ${KB_PARSING__MINERU__API_KEY:-}
+      KB_PARSING__MINERU__MODEL_VERSION: ${KB_PARSING__MINERU__MODEL_VERSION:-vlm}
+      KB_PARSING__MINERU__TIMEOUT_SECS: ${KB_PARSING__MINERU__TIMEOUT_SECS:-600}
+
+      # Reranking stays off until a model/API is explicitly selected and tested.
+      KB_RERANK__PROVIDER: ${KB_RERANK__PROVIDER:-disabled}
+      KB_RERANK__CANDIDATE_LIMIT: ${KB_RERANK__CANDIDATE_LIMIT:-30}
+      KB_RERANK__LOCAL__MODEL: ${KB_RERANK__LOCAL__MODEL:-bge-reranker-v2-m3}
+      KB_RERANK__LOCAL__CACHE_DIR: /data/models
+      KB_RERANK__API__ENDPOINT: ${KB_RERANK__API__ENDPOINT:-https://api.siliconflow.com/v1/rerank}
+      KB_RERANK__API__MODEL: ${KB_RERANK__API__MODEL:-Qwen/Qwen3-Reranker-8B}
+      KB_RERANK__API__API_KEY: ${KB_RERANK__API__API_KEY:-}
+      KB_RERANK__API__TIMEOUT_SECS: ${KB_RERANK__API__TIMEOUT_SECS:-60}
     volumes:
       - ./data/models:/data/models
+      - ./data/settings:/data/settings
     depends_on:
-      - qdrant
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
     restart: unless-stopped
+
+  # Optional local CPU parser. MinerU 4.1.2 uses its base package's ONNX Basic
+  # tier; the official project does not publish a CPU image, so this pinned
+  # inline build follows its documented Python installation and service split.
+  mineru:
+    profiles: ["mineru"]
+    init: true
+    image: qdrant-rust-mineru:4.1.2-cpu
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM python:3.12-slim-bookworm@sha256:44cf1793efa7c7a476bb0f2cff81443f4a072c90c1cb127e2924933daa3e8c64
+
+        RUN apt-get update \
+            && apt-get install -y --no-install-recommends \
+               ca-certificates curl libgl1 libglib2.0-0 libgomp1 \
+            && rm -rf /var/lib/apt/lists/*
+
+        ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+            PIP_DEFAULT_TIMEOUT=180 \
+            PIP_RETRIES=20 \
+            HF_HUB_DOWNLOAD_TIMEOUT=180 \
+            HF_HUB_ETAG_TIMEOUT=60 \
+            PYTHONUNBUFFERED=1 \
+            MINERU_HOME=/opt/mineru \
+            MINERU_MODEL_SOURCE=local \
+            MINERU_MODEL_SMALL_BACKEND=onnx \
+            MINERU_MODEL_ONNX_DEVICE=cpu \
+            MINERU_MODEL_VLM_ENGINE=llama-cpp \
+            MINERU_TELEMETRY_DISABLED=1
+
+        RUN --mount=type=cache,target=/root/.cache/pip,sharing=shared \
+            python -m pip install --timeout 180 --retries 20 "mineru==4.1.2" \
+            && python -c "from mineru.version import __version__; assert __version__ == '4.1.2', __version__"
+
+        RUN mineru-kit models download --tier basic --small-backend onnx -s huggingface
+
+        EXPOSE 8003
+        CMD ["/bin/bash", "-c", "mkdir -p /data/mineru/file-parse; mineru-kit api-server --host 127.0.0.1 --port 8001 --tier basic & until curl -fsS http://127.0.0.1:8001/v1/health >/dev/null; do sleep 2; done; exec mineru-kit file-parse-server --api-url http://127.0.0.1:8001 --host 0.0.0.0 --port 8003 --state-dir /data/mineru/file-parse"]
+    ports:
+      - "127.0.0.1:${MINERU_HTTP_PORT:-8003}:8003"
+    volumes:
+      - ./data/mineru:/data/mineru
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS http://127.0.0.1:8001/v1/health >/dev/null
+          && curl -fsS http://127.0.0.1:8003/openapi.json >/dev/null
+      interval: 15s
+      timeout: 8s
+      retries: 40
+      start_period: 90s
+    restart: unless-stopped
+
+volumes:
+  qdrant-storage:

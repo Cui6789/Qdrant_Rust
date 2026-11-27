@@ -7,7 +7,8 @@ use crate::components::ui::{CollectionBars, Spinner, StatTile};
 use crate::components::workbench::{MainHead, PanePanel};
 use crate::icons;
 use crate::util::{
-    embedding_label, format_duration, format_int, format_time, host_label, truncate,
+    embedding_model_label, embedding_provider_label, format_duration, format_int, format_time,
+    host_label,
 };
 
 #[derive(Properties, PartialEq)]
@@ -47,12 +48,20 @@ pub fn overview_section(props: &OverviewProps) -> Html {
                     } else {
                         format!("{uptime_minutes} 分钟")
                     };
-                    let embedding_endpoint = overview
-                        .embedding
-                        .base_url
-                        .as_deref()
-                        .map(host_label)
-                        .unwrap_or_else(|| "尚未接入".to_string());
+                    let embedding_summary = if overview.embedding.configured {
+                        format!(
+                            "{} · {} · {}",
+                            embedding_provider_label(&overview.embedding),
+                            embedding_model_label(&overview.embedding),
+                            overview
+                                .embedding
+                                .dimension
+                                .map(|dimension| format!("{dimension} 维"))
+                                .unwrap_or_else(|| "维度未知".to_string())
+                        )
+                    } else {
+                        "后端嵌入服务未就绪".to_string()
+                    };
                     html! {
                         <>
                             <PanePanel
@@ -90,15 +99,15 @@ pub fn overview_section(props: &OverviewProps) -> Html {
                                     </div>
                                 </div>
                                 <div class="status-row">
-                                    <span class="status-row-icon">{ icons::key() }</span>
+                                    <span class="status-row-icon">{ icons::spark() }</span>
                                     <div class="status-row-body">
-                                        <span class="status-row-label">{ "嵌入服务" }</span>
-                                        <span class="status-row-value mono">
-                                            { if overview.embedding.configured { embedding_endpoint } else { "尚未接入".to_string() } }
+                                        <span class="status-row-label">{ "当前嵌入" }</span>
+                                        <span class="status-row-value mono" title={embedding_summary.clone()}>
+                                            { embedding_summary }
                                         </span>
                                     </div>
                                     <span class={classes!("status-badge", overview.embedding.configured.then_some("is-online"))}>
-                                        { if overview.embedding.configured { "就绪" } else { "待配置" } }
+                                        { if overview.embedding.configured { "就绪" } else { "不可用" } }
                                     </span>
                                 </div>
                                 <div class="status-row">
@@ -108,14 +117,6 @@ pub fn overview_section(props: &OverviewProps) -> Html {
                                         <span class="status-row-value">{ uptime }</span>
                                     </div>
                                 </div>
-                                { if overview.embedding.api_key_masked.is_some() {
-                                    html! {
-                                        <p class="key-hint">
-                                            { icons::shield() }
-                                            { format!("密钥仅驻留本机内存：{}", overview.embedding.api_key_masked.clone().unwrap_or_default()) }
-                                        </p>
-                                    }
-                                } else { Html::default() } }
                             </PanePanel>
 
                             <PanePanel
@@ -185,7 +186,7 @@ pub fn overview_section(props: &OverviewProps) -> Html {
             <MainHead
                 kicker={"Live overview".to_string()}
                 title={html! { <>{"向量库的"}<span class="serif-accent">{"此刻"}</span>{"。"}</> }}
-                subtitle={Some("集合、向量点、维度与嵌入配置，全部直接读取 Qdrant 与当前进程。".to_string())}
+                subtitle={Some("集合、向量点与当前嵌入服务状态，全部直接读取后端与 Qdrant。".to_string())}
                 actions={html! {
                     <button class="button button-small button-ghost" onclick={on_refresh.clone()}>
                         { icons::refresh() }
@@ -194,12 +195,6 @@ pub fn overview_section(props: &OverviewProps) -> Html {
                 }}
             />
             { if let Some(overview) = props.overview.as_ref() {
-                let embedding_dimension = overview
-                    .embedding
-                    .dimension
-                    .map(|dimension| format!("{dimension} 维"))
-                    .unwrap_or_else(|| "—".to_string());
-                let label = embedding_label(&overview.embedding);
                 html! {
                     <>
                         { if !overview.qdrant.ready {
@@ -236,12 +231,6 @@ pub fn overview_section(props: &OverviewProps) -> Html {
                                 value={overview.max_dimension.to_string()}
                                 hint={Some("Dimension".to_string())}
                                 icon={icons::cpu()}
-                            />
-                            <StatTile
-                                label={"当前嵌入模型".to_string()}
-                                value={truncate(&label, 22)}
-                                hint={Some(embedding_dimension)}
-                                icon={icons::spark()}
                             />
                         </div>
 

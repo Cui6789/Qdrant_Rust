@@ -5,6 +5,7 @@
 
 pub mod api;
 pub mod error;
+pub mod management;
 pub mod state;
 
 pub use error::ApiError;
@@ -12,10 +13,12 @@ pub use state::AppState;
 
 use std::sync::Arc;
 
-use kb_core::config::{EmbeddingConfig, ProviderKind};
+use kb_core::config::{EmbeddingConfig, EmbeddingProtocol, ProviderKind};
 use kb_core::embedding::api::ApiEmbedding;
+use kb_core::embedding::dashscope::DashScopeEmbedding;
 #[cfg(feature = "local-embedding")]
 use kb_core::embedding::local::LocalEmbedding;
+use kb_core::embedding::mock::DeterministicEmbedding;
 use kb_core::embedding::EmbeddingProvider;
 use kb_core::error::{KbError, Result};
 
@@ -25,16 +28,23 @@ use kb_core::error::{KbError, Result};
 /// download or load an ONNX model during construction.
 pub async fn build_embedder(config: &EmbeddingConfig) -> Result<Arc<dyn EmbeddingProvider>> {
     match config.provider {
-        ProviderKind::Api => {
-            let provider = ApiEmbedding::new(
-                &config.api,
-                config.batch_size,
-                config.max_concurrent_batches,
-            )
-            .await?;
-            Ok(Arc::new(provider))
-        }
+        ProviderKind::Api => match config.api.protocol {
+            EmbeddingProtocol::Openai => Ok(Arc::new(
+                ApiEmbedding::new(
+                    &config.api,
+                    config.batch_size,
+                    config.max_concurrent_batches,
+                )
+                .await?,
+            )),
+            EmbeddingProtocol::Dashscope => Ok(Arc::new(
+                DashScopeEmbedding::new(&config.api, config.batch_size).await?,
+            )),
+        },
         ProviderKind::Local => build_local_embedder(config).await,
+        ProviderKind::Mock => Ok(Arc::new(DeterministicEmbedding::new(
+            config.mock_dimensions,
+        ))),
     }
 }
 

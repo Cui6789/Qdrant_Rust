@@ -35,10 +35,6 @@ pub fn logo() -> Html {
     }
 }
 
-pub fn arrow_right() -> Html {
-    icon(html! { <path d="M5 12h14M13 6l6 6-6 6"/> })
-}
-
 pub fn database() -> Html {
     icon(html! {
         <>
@@ -55,15 +51,6 @@ pub fn layers() -> Html {
             <path d="M12 3 3 7.5 12 12l9-4.5L12 3Z"/>
             <path d="m3 12 9 4.5L21 12"/>
             <path d="m3 16.5 9 4.5 9-4.5"/>
-        </>
-    })
-}
-
-pub fn key() -> Html {
-    icon(html! {
-        <>
-            <circle cx="8" cy="15" r="4"/>
-            <path d="m11 12 8-8M16 4l3 3M14 6l2 2"/>
         </>
     })
 }
@@ -131,25 +118,6 @@ pub fn file() -> Html {
     })
 }
 
-pub fn eye() -> Html {
-    icon(html! {
-        <>
-            <path d="M2.5 12S6 5.8 12 5.8 21.5 12 21.5 12 18 18.2 12 18.2 2.5 12 2.5 12Z"/>
-            <circle cx="12" cy="12" r="3"/>
-        </>
-    })
-}
-
-pub fn eye_off() -> Html {
-    icon(html! {
-        <>
-            <path d="M4 4l16 16"/>
-            <path d="M9.9 5.2A9.9 9.9 0 0 1 12 5.8c6 0 9.5 6.2 9.5 6.2a17 17 0 0 1-3.2 3.9M6.2 7.1A16.4 16.4 0 0 0 2.5 12S6 18.2 12 18.2c1 0 1.9-.2 2.8-.5"/>
-            <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>
-        </>
-    })
-}
-
 pub fn cpu() -> Html {
     icon(html! {
         <>
@@ -164,15 +132,6 @@ pub fn activity() -> Html {
     icon(html! { <path d="M3 12h4l2.5-7 4.5 14 2.5-7h4.5"/> })
 }
 
-pub fn shield() -> Html {
-    icon(html! {
-        <>
-            <path d="M12 3 5 6v5.5c0 4.4 2.9 7.7 7 9.5 4.1-1.8 7-5.1 7-9.5V6l-7-3Z"/>
-            <path d="m9 12 2.2 2.2L15.5 10"/>
-        </>
-    })
-}
-
 pub fn clock() -> Html {
     icon(html! {
         <>
@@ -184,13 +143,4 @@ pub fn clock() -> Html {
 
 pub fn play() -> Html {
     icon(html! { <path d="M8 5.5v13l10-6.5-10-6.5Z"/> })
-}
-
-pub fn pulse() -> Html {
-    icon(html! {
-        <>
-            <circle cx="12" cy="12" r="2"/>
-            <path d="M7.8 16.2a6 6 0 0 1 0-8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2"/>
-        </>
-    })
 }

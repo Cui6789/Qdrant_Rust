@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use chrono::{SecondsFormat, Utc};
-use kb_core::embedding::EmbeddingProvider;
 use kb_core::service::{IngestEvent, IngestInput, KnowledgeBaseService};
 use kb_dashboard_types::{JobStatus, PipelineChunkPreview, PipelineEvent, PipelineResult};
 use serde_json::json;
@@ -17,7 +16,7 @@ pub struct PreparedPipeline {
     pub collection: String,
     pub input: IngestInput,
     pub points_before: u64,
-    pub provider: Arc<dyn EmbeddingProvider>,
+    pub service: Arc<KnowledgeBaseService>,
     pub started: Instant,
 }
 
@@ -95,11 +94,6 @@ async fn run(state: AppState, prepared: PreparedPipeline) {
     );
 
     let artifacts = Arc::new(Mutex::new(Artifacts::default()));
-    let service = KnowledgeBaseService::new(
-        state.store.clone(),
-        prepared.provider.clone(),
-        state.ingest.clone(),
-    );
 
     let observer = {
         let state = state.clone();
@@ -216,7 +210,8 @@ async fn run(state: AppState, prepared: PreparedPipeline) {
         }
     };
 
-    let outcome = service
+    let outcome = prepared
+        .service
         .ingest_document_observed(&collection, prepared.input, &observer)
         .await;
 
@@ -239,7 +234,7 @@ async fn run(state: AppState, prepared: PreparedPipeline) {
                 )
             };
             if dimension == 0 {
-                dimension = prepared.provider.dimension();
+                dimension = prepared.service.embedder().dimension();
             }
             let duration_ms = started.elapsed().as_millis() as u64;
             let pipeline_result = PipelineResult {

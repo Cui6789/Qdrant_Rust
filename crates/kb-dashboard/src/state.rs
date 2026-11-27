@@ -4,12 +4,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use anyhow::Context;
 use chrono::{DateTime, Utc};
-use kb_core::config::{AppConfig, IngestConfig};
-use kb_core::embedding::EmbeddingProvider;
+use kb_core::config::ProviderKind;
+use kb_core::service::KnowledgeBaseService;
 use kb_core::store::QdrantStore;
-use kb_dashboard_types::{EmbeddingDefaults, EmbeddingStatus, PipelineJob, PipelineResult};
+use kb_dashboard_types::{EmbeddingStatus, PipelineJob, PipelineResult};
 
 /// Default number of Qdrant points scanned when building the document list.
 pub const DEFAULT_DOC_SCAN_LIMIT: u32 = 2_000;
@@ -18,19 +17,14 @@ pub const MAX_DOC_SCAN_LIMIT: u32 = 10_000;
 /// Number of recent ingestion jobs kept in memory.
 const MAX_JOBS: usize = 40;
 
+type CurrentService = dyn Fn() -> (Arc<KnowledgeBaseService>, ProviderKind) + Send + Sync;
+
 /// Everything an HTTP handler needs.
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<QdrantStore>,
     pub qdrant_url: String,
-    pub qdrant_api_key_configured: bool,
-    pub ingest: IngestConfig,
-    pub embedding: Arc<tokio::sync::RwLock<EmbeddingRuntime>>,
-    pub defaults: EmbeddingDefaults,
-    pub embedding_timeout_secs: u64,
-    pub embedding_max_retries: usize,
-    pub embedding_batch_size: usize,
-    pub embedding_max_concurrent_batches: usize,
+    current_service: Arc<CurrentService>,
     pub jobs: Arc<Mutex<JobStore>>,
     pub started_instant: Instant,
     pub started_at: DateTime<Utc>,
@@ -38,57 +32,36 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Creates dashboard state from the shared application config.
-    ///
-    /// The Qdrant client is constructed here, but no connection is attempted;
-    /// the caller decides whether to probe it during startup.
-    pub fn from_config(config: &AppConfig) -> anyhow::Result<Self> {
-        let store = Arc::new(QdrantStore::new(&config.qdrant).context("创建 Qdrant 客户端失败")?);
-        Ok(Self {
+    /// Uses the knowledge-base service snapshot supplied by the host on each request.
+    pub fn new(
+        store: Arc<QdrantStore>,
+        qdrant_url: String,
+        current_service: impl Fn() -> (Arc<KnowledgeBaseService>, ProviderKind) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
             store,
-            qdrant_url: config.qdrant.url.clone(),
-            qdrant_api_key_configured: !config.qdrant.api_key.trim().is_empty(),
-            ingest: config.ingest.clone(),
-            embedding: Arc::new(tokio::sync::RwLock::new(EmbeddingRuntime::default())),
-            defaults: EmbeddingDefaults {
-                base_url: config.embedding.api.base_url.clone(),
-                model: config.embedding.api.model.clone(),
-                dimensions: config.embedding.api.dimensions,
-            },
-            embedding_timeout_secs: config.embedding.api.timeout_secs,
-            embedding_max_retries: config.embedding.api.max_retries,
-            embedding_batch_size: config.embedding.batch_size,
-            embedding_max_concurrent_batches: config.embedding.max_concurrent_batches,
+            qdrant_url,
+            current_service: Arc::new(current_service),
             jobs: Arc::new(Mutex::new(JobStore::default())),
             started_instant: Instant::now(),
             started_at: Utc::now(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-        })
-    }
-
-    /// Cloneable snapshot of the currently configured embedding status.
-    pub async fn embedding_status(&self) -> EmbeddingStatus {
-        self.embedding.read().await.status.clone()
-    }
-
-    /// Provider snapshot; `None` when no embedding endpoint is configured.
-    pub async fn embedding_provider(&self) -> Option<Arc<dyn EmbeddingProvider>> {
-        self.embedding.read().await.provider.clone()
-    }
-}
-
-/// Mutable embedding configuration held in memory for this process only.
-pub struct EmbeddingRuntime {
-    pub provider: Option<Arc<dyn EmbeddingProvider>>,
-    pub status: EmbeddingStatus,
-}
-
-impl Default for EmbeddingRuntime {
-    fn default() -> Self {
-        Self {
-            provider: None,
-            status: EmbeddingStatus::empty(),
         }
+    }
+
+    pub fn embedding_status(&self) -> EmbeddingStatus {
+        let (service, kind) = (self.current_service)();
+        let embedder = service.embedder();
+        EmbeddingStatus {
+            configured: true,
+            kind: Some(kind.as_str().into()),
+            model: Some(embedder.model_id().into()),
+            dimension: Some(embedder.dimension()),
+        }
+    }
+
+    pub fn service(&self) -> Arc<KnowledgeBaseService> {
+        (self.current_service)().0
     }
 }
 

@@ -25,7 +25,6 @@ pub struct BrowserProps {
     pub embedding_configured: bool,
     pub on_changed: Callback<()>,
     pub on_open_ingest: Callback<()>,
-    pub on_open_model: Callback<()>,
 }
 
 #[function_component(BrowserSection)]
@@ -49,10 +48,6 @@ pub fn browser_section(props: &BrowserProps) -> Html {
 
     let on_open_ingest = {
         let callback = props.on_open_ingest.clone();
-        Callback::from(move |_: web_sys::MouseEvent| callback.emit(()))
-    };
-    let on_open_model = {
-        let callback = props.on_open_model.clone();
         Callback::from(move |_: web_sys::MouseEvent| callback.emit(()))
     };
 
@@ -303,7 +298,7 @@ pub fn browser_section(props: &BrowserProps) -> Html {
                 return;
             }
             if !embedding_configured {
-                search_error.set(Some("请先在「模型接入」中配置嵌入服务".to_string()));
+                search_error.set(Some("后端嵌入服务尚未就绪，请稍后重试".to_string()));
                 return;
             }
             let Some(collection) = collection.clone() else {
@@ -448,10 +443,8 @@ pub fn browser_section(props: &BrowserProps) -> Html {
                 { if !props.embedding_configured {
                     html! {
                         <p class="inline-hint">
-                            { icons::key() }
-                            { "语义检索需要嵌入模型；当前仅能浏览与过滤文档。" }
-                            <button class="button button-small button-ghost" type="button"
-                                onclick={on_open_model.clone()}>{ "去接入" }</button>
+                            { icons::cpu() }
+                            { "语义检索依赖后端嵌入服务；未就绪时仍可浏览与过滤文档。" }
                         </p>
                     }
                 } else { Html::default() } }
@@ -476,6 +469,9 @@ pub fn browser_section(props: &BrowserProps) -> Html {
                                     <h3>{ format!("「{}」的最近邻", response.query) }</h3>
                                 </div>
                                 <div class="search-panel-meta">
+                                    <span class="chip chip-muted" title={response.embedding_model.clone()}>
+                                        { truncate(&response.embedding_model, 28) }
+                                    </span>
                                     <span class="chip chip-muted">{ format!("{} 维", vector_size) }</span>
                                     <span class="chip chip-muted">{ format!("{} ms", response.took_ms) }</span>
                                     <button class="icon-button" type="button" onclick={on_search_clear} title="关闭检索结果">
@@ -491,13 +487,28 @@ pub fn browser_section(props: &BrowserProps) -> Html {
                                         { for response.results.iter().map(|hit| {
                                             let doc_id = hit.doc_id.clone();
                                             let open = open_detail.clone();
-                                            let width = hit.score.clamp(0.0, 1.0) * 100.0;
+                                            let rerank = hit.rerank_score;
+                                            let ranking_score = rerank.unwrap_or(hit.score);
+                                            let width = ranking_score.clamp(0.0, 1.0) * 100.0;
                                             html! {
                                                 <li>
                                                     <button type="button" class="search-hit"
                                                         onclick={Callback::from(move |_| open.emit(doc_id.clone()))}>
                                                         <span class="search-score">
-                                                            <span class="search-score-value mono">{ format!("{:.3}", hit.score) }</span>
+                                                            <span class="search-score-pair">
+                                                                <span class="search-score-item">
+                                                                    <span class="search-score-label">{ "向量" }</span>
+                                                                    <span class="search-score-value mono">{ format!("{:.3}", hit.score) }</span>
+                                                                </span>
+                                                                { if let Some(score) = rerank {
+                                                                    html! {
+                                                                        <span class="search-score-item">
+                                                                            <span class="search-score-label">{ "重排" }</span>
+                                                                            <span class="search-score-value mono">{ format!("{score:.3}") }</span>
+                                                                        </span>
+                                                                    }
+                                                                } else { Html::default() } }
+                                                            </span>
                                                             <span class="score-track"><span class="score-fill" style={format!("width:{width:.1}%")}></span></span>
                                                         </span>
                                                         <span class="search-hit-body">
@@ -586,7 +597,7 @@ pub fn browser_section(props: &BrowserProps) -> Html {
                                 <span>{ "标签" }</span>
                                 <span>{ "块" }</span>
                                 <span>{ "字符" }</span>
-                                <span>{ "模型" }</span>
+                                <span>{ "嵌入模型" }</span>
                                 <span>{ "写入时间" }</span>
                                 <span></span>
                             </div>
@@ -670,7 +681,12 @@ pub fn browser_section(props: &BrowserProps) -> Html {
                                                 <div class="modal-chips">
                                                     <span class="chip chip-muted">{ format!("{} 块", document.chunk_count) }</span>
                                                     <span class="chip chip-muted">{ format!("{} 字符", format_int(document.characters)) }</span>
-                                                    <span class="chip chip-muted">{ document.embedding_model.clone().unwrap_or_else(|| "—".to_string()) }</span>
+                                                    <span class="chip chip-muted">
+                                                        { format!(
+                                                            "嵌入 · {}",
+                                                            document.embedding_model.clone().unwrap_or_else(|| "—".to_string())
+                                                        ) }
+                                                    </span>
                                                     { for document.tags.iter().map(|tag| html! {
                                                         <span class="chip chip-accent">{ tag.clone() }</span>
                                                     }) }

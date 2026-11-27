@@ -1,4 +1,5 @@
 pub mod api;
+pub mod dashscope;
 #[cfg(feature = "local-embedding")]
 pub mod local;
 pub mod mock;

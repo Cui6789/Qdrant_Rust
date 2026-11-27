@@ -7,6 +7,8 @@ use figment::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::{KbError, Result};
+use crate::ingest::upload::ParsingConfig;
+use crate::rerank::{self, RerankConfig};
 
 /// Default location of the configuration file, relative to the process cwd.
 const DEFAULT_CONFIG_PATH: &str = "config/config.toml";
@@ -16,9 +18,12 @@ const DEFAULT_CONFIG_PATH: &str = "config/config.toml";
 #[serde(default)]
 pub struct AppConfig {
     pub server: ServerConfig,
+    pub admin: AdminConfig,
     pub qdrant: QdrantConfig,
     pub embedding: EmbeddingConfig,
     pub ingest: IngestConfig,
+    pub parsing: ParsingConfig,
+    pub rerank: RerankConfig,
 }
 
 impl AppConfig {
@@ -99,23 +104,37 @@ impl AppConfig {
                 "embedding.api.timeout_secs must be greater than 0".into(),
             ));
         }
+        if !(1..=4096).contains(&self.embedding.mock_dimensions) {
+            return Err(KbError::Config(
+                "embedding.mock_dimensions must be between 1 and 4096".into(),
+            ));
+        }
+        let base_url = self.embedding.api.base_url.trim();
+        if self.embedding.provider == ProviderKind::Api || !base_url.is_empty() {
+            let url = reqwest::Url::parse(base_url).ok();
+            if !url.is_some_and(|url| {
+                matches!(url.scheme(), "http" | "https")
+                    && url.has_host()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+            }) {
+                return Err(KbError::Config(
+                    "embedding.api.base_url must be an HTTP(S) URL without credentials, query, or fragment".into(),
+                ));
+            }
+        }
         match self.embedding.provider {
             ProviderKind::Local if self.embedding.local.model.is_empty() => {
                 return Err(KbError::Config(
                     "embedding.local.model must not be empty when provider is local".into(),
                 ));
             }
-            ProviderKind::Api => {
-                if self.embedding.api.base_url.is_empty() {
-                    return Err(KbError::Config(
-                        "embedding.api.base_url must not be empty when provider is api".into(),
-                    ));
-                }
-                if self.embedding.api.model.is_empty() {
-                    return Err(KbError::Config(
-                        "embedding.api.model must not be empty when provider is api".into(),
-                    ));
-                }
+            ProviderKind::Api if self.embedding.api.model.is_empty() => {
+                return Err(KbError::Config(
+                    "embedding.api.model must not be empty when provider is api".into(),
+                ));
             }
             _ => {}
         }
@@ -139,12 +158,20 @@ impl AppConfig {
                 "ingest.upsert_batch_size must be greater than 0".into(),
             ));
         }
+        if self.admin.settings_path.as_os_str().is_empty() {
+            return Err(KbError::Config(
+                "admin.settings_path must not be empty".into(),
+            ));
+        }
+        self.parsing.validate()?;
+        rerank::validate_config(&self.rerank)?;
         Ok(())
     }
 
     fn trim(&mut self) {
         self.server.host = self.server.host.trim().to_string();
         self.server.api_key = self.server.api_key.trim().to_string();
+        self.admin.access_key = self.admin.access_key.trim().to_string();
         self.qdrant.url = self.qdrant.url.trim().to_string();
         self.qdrant.api_key = self.qdrant.api_key.trim().to_string();
         self.embedding.local.model = self.embedding.local.model.trim().to_string();
@@ -155,6 +182,23 @@ impl AppConfig {
         self.embedding.api.base_url = self.embedding.api.base_url.trim().to_string();
         self.embedding.api.api_key = self.embedding.api.api_key.trim().to_string();
         self.embedding.api.model = self.embedding.api.model.trim().to_string();
+    }
+}
+
+/// Access and persistence for the management API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdminConfig {
+    pub access_key: String,
+    pub settings_path: PathBuf,
+}
+
+impl Default for AdminConfig {
+    fn default() -> Self {
+        Self {
+            access_key: String::new(),
+            settings_path: PathBuf::from("./data/settings/runtime.json"),
+        }
     }
 }
 
@@ -203,12 +247,13 @@ impl Default for QdrantConfig {
 }
 
 /// Embedding provider selection and shared batching settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EmbeddingConfig {
     pub provider: ProviderKind,
     pub batch_size: usize,
     pub max_concurrent_batches: usize,
+    pub mock_dimensions: usize,
     pub local: LocalEmbeddingConfig,
     pub api: ApiEmbeddingConfig,
 }
@@ -219,6 +264,7 @@ impl Default for EmbeddingConfig {
             provider: ProviderKind::Local,
             batch_size: 32,
             max_concurrent_batches: 4,
+            mock_dimensions: 512,
             local: LocalEmbeddingConfig::default(),
             api: ApiEmbeddingConfig::default(),
         }
@@ -232,13 +278,35 @@ pub enum ProviderKind {
     #[default]
     Local,
     Api,
+    Mock,
+}
+
+impl ProviderKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Api => "api",
+            Self::Mock => "mock",
+        }
+    }
+}
+
+/// Wire protocol used by a remote embedding endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EmbeddingProtocol {
+    #[default]
+    Openai,
+    Dashscope,
 }
 
 /// In-process fastembed (ONNX) provider settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LocalEmbeddingConfig {
     pub model: String,
+    /// Output dimensions. Zero keeps the model's native output.
+    pub dimensions: usize,
     pub cache_dir: String,
     pub show_download_progress: bool,
     pub max_length: usize,
@@ -251,6 +319,7 @@ impl Default for LocalEmbeddingConfig {
     fn default() -> Self {
         Self {
             model: "bge-small-zh-v1.5".to_string(),
+            dimensions: 0,
             cache_dir: "./data/models".to_string(),
             show_download_progress: true,
             max_length: 512,
@@ -261,10 +330,11 @@ impl Default for LocalEmbeddingConfig {
     }
 }
 
-/// OpenAI-compatible embedding API settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Remote embedding API settings.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ApiEmbeddingConfig {
+    pub protocol: EmbeddingProtocol,
     pub base_url: String,
     pub api_key: String,
     pub model: String,
@@ -276,6 +346,7 @@ pub struct ApiEmbeddingConfig {
 impl Default for ApiEmbeddingConfig {
     fn default() -> Self {
         Self {
+            protocol: EmbeddingProtocol::Openai,
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: String::new(),
             model: "text-embedding-3-small".to_string(),
@@ -283,6 +354,16 @@ impl Default for ApiEmbeddingConfig {
             timeout_secs: 60,
             max_retries: 3,
         }
+    }
+}
+
+impl std::fmt::Debug for ApiEmbeddingConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ApiEmbeddingConfig")
+            .field("protocol", &self.protocol)
+            .field("dimensions", &self.dimensions)
+            .finish_non_exhaustive()
     }
 }
 

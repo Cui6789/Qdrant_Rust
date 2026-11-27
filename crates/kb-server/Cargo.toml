@@ -5,15 +5,19 @@ edition.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["local-embedding"]
+default = ["local-embedding", "local-rerank"]
 local-embedding = ["kb-core/local-embedding"]
+local-rerank = ["kb-core/local-rerank"]
 
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8.9", features = ["multipart"] }
 kb-core = { path = "../kb-core", default-features = false }
+kb-dashboard = { path = "../kb-dashboard" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+subtle = "2"
+tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "timeout"] }

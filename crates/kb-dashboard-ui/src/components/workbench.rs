@@ -4,24 +4,18 @@ use yew::prelude::*;
 
 use crate::icons;
 
-/// The four workbench categories shown in the left pane.
+/// The workbench categories shown in the left pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Category {
     Overview,
     Ingest,
     Search,
-    Model,
 }
 
 impl Category {
     /// Categories in sidebar order.
-    pub fn all() -> [Category; 4] {
-        [
-            Category::Overview,
-            Category::Ingest,
-            Category::Search,
-            Category::Model,
-        ]
+    pub fn all() -> [Category; 3] {
+        [Category::Overview, Category::Ingest, Category::Search]
     }
 
     /// Short label shown on the category button.
@@ -30,7 +24,6 @@ impl Category {
             Self::Overview => "概览",
             Self::Ingest => "入库",
             Self::Search => "检索",
-            Self::Model => "模型接入",
         }
     }
 
@@ -40,7 +33,6 @@ impl Category {
             Self::Overview => "连接与集合状态",
             Self::Ingest => "写入一篇文档",
             Self::Search => "检索与浏览数据库",
-            Self::Model => "接入嵌入模型",
         }
     }
 
@@ -49,7 +41,6 @@ impl Category {
             Self::Overview => icons::activity(),
             Self::Ingest => icons::upload(),
             Self::Search => icons::search(),
-            Self::Model => icons::spark(),
         }
     }
 }
